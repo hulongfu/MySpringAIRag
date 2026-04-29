@@ -96,21 +96,23 @@ public class AsyncUploadService {
         log.info("Starting async processing for task: {}, file: {}", taskId, filename);
         
         try {
-            sseController.notifyProgress(taskId, 10, "正在读取文件...");
+            // 设置当前任务ID（供 RagService 使用）
+            RagService.setCurrentTaskId(taskId);
             
-            sseController.notifyProgress(taskId, 30, "正在解析文档...");
-            
-            // 执行实际的上传逻辑
+            // 执行文件读取和解析（包含分块、向量化、存储）
+            // RagService 内部会在关键节点推送进度（10%, 30%, 60%, 90%）
             ragService.uploadDocumentFromPath(tempFile, filename);
             
-            sseController.notifyProgress(taskId, 90, "正在生成向量索引...");
-            
+            // 100% - 全部完成
             sseController.notifyCompletion(taskId, "文档处理完成！");
             
         } catch (Exception e) {
             log.error("Task {} failed", taskId, e);
             sseController.notifyCompletion(taskId, "处理失败: " + e.getMessage());
         } finally {
+            // 清除任务ID
+            RagService.clearCurrentTaskId();
+            
             // 清理临时文件
             try {
                 Files.deleteIfExists(tempFile);

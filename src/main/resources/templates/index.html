@@ -382,31 +382,65 @@
             
             // 创建新的SSE连接
             currentEventSource = new EventSource(`/api/knowledge/stream/${taskId}`);
+            
+            let lastProgressTime = 0;  // 记录上次进度更新时间
                     
             currentEventSource.addEventListener('progress', (event) => {
                 const data = JSON.parse(event.data);
+                const currentTime = Date.now();
                         
                 if (data.status === 'COMPLETED') {
-                    showMessage(`✅ ${data.message}`, 'success');
-                    loadDocuments();
-                    currentEventSource.close();
-                    currentEventSource = null;
+                    // 移除 onerror 监听器，避免正常关闭时触发错误
+                    currentEventSource.onerror = null;
                     
-                    // 清空文件选择
-                    selectedFile = null;
-                    document.getElementById('file-input').value = '';
+                    // 确保至少显示500ms的90%进度
+                    const timeSinceLastProgress = currentTime - lastProgressTime;
+                    if (timeSinceLastProgress < 500) {
+                        setTimeout(() => {
+                            showMessage(`✅ ${data.message}`, 'success', true);
+                            loadDocuments();
+                            currentEventSource.close();
+                            currentEventSource = null;
                             
-                    document.getElementById('upload-btn').disabled = false;
-                    document.getElementById('upload-btn').textContent = '上传文档';
+                            // 清空文件选择
+                            selectedFile = null;
+                            document.getElementById('file-input').value = '';
+                                    
+                            document.getElementById('upload-btn').disabled = false;
+                            document.getElementById('upload-btn').textContent = '上传文档';
+                        }, 500 - timeSinceLastProgress);
+                    } else {
+                        showMessage(`✅ ${data.message}`, 'success', true);
+                        loadDocuments();
+                        currentEventSource.close();
+                        currentEventSource = null;
+                        
+                        // 清空文件选择
+                        selectedFile = null;
+                        document.getElementById('file-input').value = '';
+                                
+                        document.getElementById('upload-btn').disabled = false;
+                        document.getElementById('upload-btn').textContent = '上传文档';
+                    }
                 } else {
-                    // 显示进度
+                    // 显示进度（不自动消失，等待下一个进度消息替换）
                     const progressMsg = `处理中... ${data.status} (${data.progress}%)`;
-                    showMessage(progressMsg, 'info');
+                    showMessage(progressMsg, 'info', false);
+                    lastProgressTime = currentTime;  // 更新最后进度时间
                 }
             });
                     
             currentEventSource.onerror = (error) => {
                 console.error('SSE error:', error);
+                
+                // 检查连接状态，如果是 CLOSED (2)，说明是正常关闭，不显示错误
+                if (currentEventSource && currentEventSource.readyState === EventSource.CLOSED) {
+                    console.log('SSE connection closed normally');
+                    currentEventSource = null;
+                    return;
+                }
+                
+                // 只有在 CONNECTING (0) 或 OPEN (1) 状态下才显示错误
                 showMessage('连接中断，请刷新页面查看结果', 'error');
                 if (currentEventSource) {
                     currentEventSource.close();
@@ -536,7 +570,7 @@
         }
 
         // 显示消息提示
-        function showMessage(text, type) {
+        function showMessage(text, type, autoRemove = true) {
             const messageArea = document.getElementById('message-area');
             const messageDiv = document.createElement('div');
             messageDiv.className = type;
@@ -545,9 +579,12 @@
             messageArea.innerHTML = '';
             messageArea.appendChild(messageDiv);
             
-            setTimeout(() => {
-                messageDiv.remove();
-            }, 3000);
+            // 只有当 autoRemove 为 true 时才自动移除（默认行为）
+            if (autoRemove) {
+                setTimeout(() => {
+                    messageDiv.remove();
+                }, 3000);
+            }
         }
     </script>
 </body>

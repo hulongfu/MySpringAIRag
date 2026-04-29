@@ -1,5 +1,6 @@
 package com.myspringairag.service;
 
+import com.myspringairag.controller.SseController;
 import com.myspringairag.model.Document;
 import com.myspringairag.repository.DocumentRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +27,10 @@ public class RagService {
     private final ChatClient chatClient;
     private final QueryRewriteService queryRewriteService;
     private final HierarchicalChunkingService hierarchicalChunkingService;
+    private final SseController sseController;
+    
+    // 使用 ThreadLocal 存储当前任务的 taskId
+    private static final ThreadLocal<String> currentTaskId = new ThreadLocal<>();
     
     @Autowired(required = false)
     private ParallelVectorRetrievalService parallelRetrievalService;
@@ -55,7 +60,8 @@ public class RagService {
             DocumentRepository documentRepository,
             ChatClient.Builder chatClientBuilder,
             QueryRewriteService queryRewriteService,
-            HierarchicalChunkingService hierarchicalChunkingService) {
+            HierarchicalChunkingService hierarchicalChunkingService,
+            SseController sseController) {
         this.parserService = parserService;
         this.embeddingService = embeddingService;
         this.jVectorService = jVectorService;
@@ -63,6 +69,7 @@ public class RagService {
         this.chatClient = chatClientBuilder.build();
         this.queryRewriteService = queryRewriteService;
         this.hierarchicalChunkingService = hierarchicalChunkingService;
+        this.sseController = sseController;
     }
     
     /**
@@ -89,18 +96,51 @@ public class RagService {
     }
     
     /**
+     * 设置当前任务ID（由 AsyncUploadService 调用）
+     */
+    public static void setCurrentTaskId(String taskId) {
+        currentTaskId.set(taskId);
+    }
+    
+    /**
+     * 清除当前任务ID
+     */
+    public static void clearCurrentTaskId() {
+        currentTaskId.remove();
+    }
+    
+    /**
+     * 获取当前任务ID
+     */
+    private static String getCurrentTaskId() {
+        return currentTaskId.get();
+    }
+    
+    /**
      * 从文件路径上传并建立索引（用于异步处理）
      */
     @Transactional
     public void uploadDocumentFromPath(Path filePath, String filename) {
+        String taskId = getCurrentTaskId();
+        
         try {
             log.info("Uploading document from path: {}", filePath);
+            
+            // 10% - 开始读取文件
+            if (taskId != null) {
+                sseController.notifyProgress(taskId, 10, "正在读取文件...");
+            }
             
             // 1. 解析文件
             String text = parserService.parseFileFromPath(filePath);
             
             if (text == null || text.trim().isEmpty()) {
                 throw new IllegalArgumentException("Document is empty or could not be parsed");
+            }
+            
+            // 30% - 文件解析完成
+            if (taskId != null) {
+                sseController.notifyProgress(taskId, 30, "正在解析文档...");
             }
             
             long fileSize = Files.size(filePath);
@@ -118,6 +158,8 @@ public class RagService {
      * 处理文本并建立索引（公共逻辑）
      */
     private void processAndIndex(String text, String filename, long fileSize, String mimeType) {
+        String taskId = getCurrentTaskId();
+        
         // 2. 分割文本（使用层级分块）
         List<String> chunks;
         List<String> parentContents;
@@ -143,6 +185,11 @@ public class RagService {
         
         if (chunks.isEmpty()) {
             throw new IllegalArgumentException("No valid chunks generated from document");
+        }
+        
+        // 60% - 分块完成
+        if (taskId != null) {
+            sseController.notifyProgress(taskId, 60, "正在生成向量...");
         }
         
         // 3. 为每个chunk生成向量并存储
@@ -171,6 +218,11 @@ public class RagService {
             jVectorService.addVector(savedDoc.getId(), vector);
             
             log.debug("Processed chunk {}/{} for {}", i + 1, chunks.size(), filename);
+        }
+        
+        // 90% - 向量化和存储完成
+        if (taskId != null) {
+            sseController.notifyProgress(taskId, 90, "正在构建向量索引...");
         }
         
         log.info("Successfully uploaded and indexed document: {} ({} chunks)", filename, chunks.size());
