@@ -1,0 +1,72 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: MySpringAIRag
+  
+  # 文件上传大小限制
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+  
+  # H2 Database Configuration
+  datasource:
+    url: jdbc:h2:file:./data/ragdb;AUTO_SERVER=TRUE
+    username: sa
+    password: 
+    driver-class-name: org.h2.Driver
+  
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+      settings:
+        web-allow-others: false
+  
+  # Spring AI Configuration
+  ai:
+    # Chat model uses SiliconFlow API
+    openai:
+      api-key: 你的API Key
+      base-url: https://api.siliconflow.cn
+      chat:
+        options:
+          model: deepseek-ai/DeepSeek-V3.2
+    
+    # Local ONNX Embedding Model
+    transformers:
+      embedding:
+        model: D:/ideaSpace/MyPython/models/bge-small-zh-v1.5-onnx/onnx/model.onnx
+
+# JVector Configuration
+jvector:
+  index-path: ./data/jvector_index
+  dimensions: 384  # BGE-Small-ZH embedding dimension
+  top-k: 20        # 向量检索返回的候选数量（增加到20，平衡召回率和性能）
+  rerank-top-k: 50  # 重排序前检索的候选数量（增加到50，进一步提升召回率）
+  similarity-threshold: 0.5  # 降低相似度阈值
+
+# File Upload Configuration
+app:
+  upload-dir: D:/tmp/MySpringAIRag/uploads
+  max-file-size: 10MB
+  chunk-size: 500          # chunk最大token数
+  chunk-overlap: 100       # 重叠token数
+  use-semantic-chunking: true  # 启用语义分块
+  semantic-similarity-threshold: 0.65  # 降低阈值，允许更多细分
+  use-reranking: false     # 禁用重排序（节省性能）
+  reranker-model-path: D:/ideaSpace/MyPython/models/bge-reranker-v2-m3-ONNX  # 重排序模型路径
+  use-parallel-retrieval: true  # 启用并行多查询变体检索
+
+# Logging
+logging:
+  level:
+    com.myspringairag: DEBUG
+    org.springframework.ai: INFO

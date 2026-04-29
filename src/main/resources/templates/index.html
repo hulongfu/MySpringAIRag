@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG 知识库问答系统</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 20px;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .panel h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+
+        .upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover {
+            background: #f8f9ff;
+            border-color: #764ba2;
+        }
+
+        .upload-area input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: transform 0.2s;
+            width: 100%;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .document-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .document-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            border-bottom: 1px solid #eee;
+            transition: background 0.2s;
+        }
+
+        .document-item:hover {
+            background: #f8f9ff;
+        }
+
+        .document-name {
+            flex: 1;
+            color: #333;
+        }
+
+        .delete-btn {
+            background: #ff4757;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+
+        .delete-btn:hover {
+            background: #ff3838;
+        }
+
+        .chat-area {
+            display: flex;
+            flex-direction: column;
+            height: 600px;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            background: #f8f9ff;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+
+        .message.user {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            margin-left: auto;
+        }
+
+        .message.assistant {
+            background: white;
+            border: 1px solid #ddd;
+            color: #333;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-area input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 1em;
+        }
+
+        .input-area input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .loading {
+            text-align: center;
+            color: #667eea;
+            padding: 20px;
+        }
+
+        .error {
+            background: #ffe0e0;
+            color: #d63031;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+        
+        .success {
+            background: #e0ffe0;
+            color: #27ae60;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+        
+        .info {
+            background: #e0f0ff;
+            color: #2980b9;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+            margin-bottom: 15px;
+        }
+
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+        
+        .info {
+            background: #e0f0ff;
+            color: #2980b9;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 RAG 知识库问答系统</h1>
+            <p>基于 JVector + H2 的智能文档问答</p>
+        </header>
+
+        <div class="main-content">
+            <!-- 左侧：文档管理 -->
+            <div class="panel">
+                <h2>📚 文档管理</h2>
+                
+                <div id="message-area"></div>
+
+                <div class="upload-area" onclick="document.getElementById('file-input').click()">
+                    <input type="file" id="file-input" accept=".txt,.pdf,.doc,.docx,.md" onchange="handleFileSelect(event)">
+                    <p>点击或拖拽文件到此处上传</p>
+                    <p style="font-size: 0.9em; color: #999; margin-top: 10px;">支持 TXT, PDF, DOC, DOCX, MD 格式</p>
+                </div>
+
+                <button class="btn" onclick="uploadFile()" id="upload-btn" disabled>上传文档</button>
+
+                <h3 style="margin-top: 25px; margin-bottom: 15px; color: #667eea;">已上传文档</h3>
+                <div class="document-list" id="document-list">
+                    <div class="empty-state">暂无文档</div>
+                </div>
+            </div>
+
+            <!-- 右侧：问答界面 -->
+            <div class="panel">
+                <h2>💬 智能问答</h2>
+                
+                <div class="chat-area">
+                    <div class="messages" id="messages">
+                        <div class="message assistant">
+                            你好！我是智能助手，可以基于知识库回答你的问题。请先上传文档，然后开始提问吧！
+                        </div>
+                    </div>
+
+                    <div class="input-area">
+                        <input type="text" id="question-input" placeholder="输入你的问题..." 
+                               onkeypress="if(event.key === 'Enter') askQuestion()">
+                        <button class="btn" style="width: auto;" onclick="askQuestion()">发送</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+        let currentEventSource = null;  // 保存当前SSE连接
+
+        // 页面加载时获取文档列表
+        window.onload = function() {
+            loadDocuments();
+        };
+
+        // 处理文件选择
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                selectedFile = file;
+                document.getElementById('upload-btn').disabled = false;
+                showMessage(`已选择文件: ${file.name}`, 'success');
+            }
+        }
+
+        // 生成UUID
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        // 上传文件
+        async function uploadFile() {
+            // 清除所有旧消息
+            document.getElementById('message-area').innerHTML = '';
+            
+            if (!selectedFile) {
+                showMessage('请先选择文件', 'error');
+                return;
+            }
+
+            try {
+                document.getElementById('upload-btn').disabled = true;
+                document.getElementById('upload-btn').textContent = '提交中...';
+
+                // 1. 生成taskId
+                const taskId = generateUUID();
+                
+                // 2. 先建立SSE连接监听进度（会自动关闭旧连接）
+                listenToProgress(taskId);
+                
+                // 3. 再发起上传请求
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+                formData.append('taskId', taskId);
+
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // 上传请求成功，立即清空文件选择状态，防止重复提交
+                    selectedFile = null;
+                    document.getElementById('file-input').value = '';
+                    // 按钮状态由SSE的COMPLETED事件控制
+                } else {
+                    showMessage(result.message || '上传失败', 'error');
+                    selectedFile = null;
+                    document.getElementById('file-input').value = '';
+                    document.getElementById('upload-btn').disabled = false;
+                    document.getElementById('upload-btn').textContent = '上传文档';
+                }
+            } catch (error) {
+                showMessage('上传失败: ' + error.message, 'error');
+                selectedFile = null;
+                document.getElementById('file-input').value = '';
+                document.getElementById('upload-btn').disabled = false;
+                document.getElementById('upload-btn').textContent = '上传文档';
+            }
+        }
+                
+        // 监听 SSE 进度
+        function listenToProgress(taskId) {
+            // 关闭之前的SSE连接
+            if (currentEventSource) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+            
+            // 创建新的SSE连接
+            currentEventSource = new EventSource(`/api/knowledge/stream/${taskId}`);
+                    
+            currentEventSource.addEventListener('progress', (event) => {
+                const data = JSON.parse(event.data);
+                        
+                if (data.status === 'COMPLETED') {
+                    showMessage(`✅ ${data.message}`, 'success');
+                    loadDocuments();
+                    currentEventSource.close();
+                    currentEventSource = null;
+                    
+                    // 清空文件选择
+                    selectedFile = null;
+                    document.getElementById('file-input').value = '';
+                            
+                    document.getElementById('upload-btn').disabled = false;
+                    document.getElementById('upload-btn').textContent = '上传文档';
+                } else {
+                    // 显示进度
+                    const progressMsg = `处理中... ${data.status} (${data.progress}%)`;
+                    showMessage(progressMsg, 'info');
+                }
+            });
+                    
+            currentEventSource.onerror = (error) => {
+                console.error('SSE error:', error);
+                showMessage('连接中断，请刷新页面查看结果', 'error');
+                if (currentEventSource) {
+                    currentEventSource.close();
+                    currentEventSource = null;
+                }
+                        
+                document.getElementById('upload-btn').disabled = false;
+                document.getElementById('upload-btn').textContent = '上传文档';
+            };
+        }
+        
+        // 加载文档列表
+        async function loadDocuments() {
+            try {
+                const response = await fetch('/api/documents');
+                const result = await response.json();
+
+                if (result.success) {
+                    const listContainer = document.getElementById('document-list');
+                    
+                    if (result.documents.length === 0) {
+                        listContainer.innerHTML = '<div class="empty-state">暂无文档</div>';
+                    } else {
+                        listContainer.innerHTML = result.documents.map(filename => `
+                            <div class="document-item">
+                                <span class="document-name">${filename}</span>
+                                <button class="delete-btn" onclick="deleteDocument('${filename}')">删除</button>
+                            </div>
+                        `).join('');
+                    }
+                }
+            } catch (error) {
+                console.error('加载文档列表失败:', error);
+            }
+        }
+
+        // 删除文档
+        async function deleteDocument(filename) {
+            if (!confirm(`确定要删除文档 "${filename}" 吗？`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/documents/${encodeURIComponent(filename)}`, {
+                    method: 'DELETE'
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showMessage('文档删除成功', 'success');
+                    loadDocuments();
+                } else {
+                    showMessage(result.message || '删除失败', 'error');
+                }
+            } catch (error) {
+                showMessage('删除失败: ' + error.message, 'error');
+            }
+        }
+
+        // 提问
+        async function askQuestion() {
+            const input = document.getElementById('question-input');
+            const question = input.value.trim();
+
+            if (!question) {
+                return;
+            }
+
+            // 添加用户消息
+            addMessage(question, 'user');
+            input.value = '';
+
+            // 显示加载中
+            const loadingId = addMessage('正在思考...', 'assistant', true);
+
+            try {
+                const response = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ question: question })
+                });
+
+                const result = await response.json();
+
+                // 移除加载消息
+                removeMessage(loadingId);
+
+                if (result.success) {
+                    addMessage(result.answer, 'assistant');
+                } else {
+                    addMessage(result.message || '回答失败', 'assistant');
+                }
+            } catch (error) {
+                removeMessage(loadingId);
+                addMessage('请求失败: ' + error.message, 'assistant');
+            }
+        }
+
+        // 添加消息
+        function addMessage(content, type, isLoading = false) {
+            const messagesContainer = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            if (isLoading) {
+                messageDiv.id = 'loading-' + Date.now();
+                messageDiv.innerHTML = '<div class="loading">⏳ 正在思考...</div>';
+            } else {
+                messageDiv.textContent = content;
+            }
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
+            return messageDiv.id;
+        }
+
+        // 移除消息
+        function removeMessage(id) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.remove();
+            }
+        }
+
+        // 显示消息提示
+        function showMessage(text, type) {
+            const messageArea = document.getElementById('message-area');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = type;
+            messageDiv.textContent = text;
+            
+            messageArea.innerHTML = '';
+            messageArea.appendChild(messageDiv);
+            
+            setTimeout(() => {
+                messageDiv.remove();
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
