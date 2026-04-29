@@ -20,13 +20,26 @@ public class QueryTokenizationService {
     // IK分词器（智能分词模式）
     private static final boolean USE_SMART_MODE = true;
     
-    // 停用词集合
+    // 停用词集合（扩展版）
     private static final Set<String> STOP_WORDS = new HashSet<>(Arrays.asList(
+        // 基础停用词
         "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
         "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
         "自己", "这", "那", "它", "他", "她", "什么", "怎么", "为什么", "如何",
         "中", "与", "及", "等", "等等", "或", "或者", "但", "但是", "而",
-        "如果", "因为", "所以", "虽然", "然后", "接着", "之后", "之前"
+        "如果", "因为", "所以", "虽然", "然后", "接着", "之后", "之前",
+        // 疑问词和助词
+        "吗", "呢", "吧", "啊", "呀", "哦", "嘛", "呗",
+        "哪", "哪些", "哪个", "哪里", "哪儿", "哪位",
+        "谁", "何时", "什么时候", "多久", "多少",
+        // 介词和连词
+        "从", "向", "往", "朝", "对", "对于", "关于", "至于",
+        "被", "把", "让", "给", "使", "令",
+        "并且", "而且", "此外", "另外", "同时",
+        // 程度副词
+        "非常", "特别", "极其", "十分", "相当", "比较", "稍微",
+        // 时间词
+        "现在", "已经", "曾经", "正在", "将要", "马上", "立刻"
     ));
     
     // 自定义术语词典（技术相关）
@@ -69,6 +82,39 @@ public class QueryTokenizationService {
             .distinct()
             .limit(10)  // 最多10个关键词
             .toArray(String[]::new);
+    }
+    
+    /**
+     * 提取核心关键词列表（用于文档过滤）
+     * @param query 用户查询
+     * @return 核心关键词列表（已去停用词、去单字）
+     */
+    public List<String> extractCoreKeywords(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        List<String> keywords = new ArrayList<>();
+        
+        // 1. IK分词
+        List<String> ikTokens = tokenizeWithIK(query);
+        keywords.addAll(ikTokens);
+        
+        // 2. 匹配自定义术语
+        List<String> customMatches = matchCustomTerms(query);
+        keywords.addAll(customMatches);
+        
+        // 3. 过滤：去空、去单字、去停用词
+        List<String> filtered = keywords.stream()
+            .filter(token -> token != null && !token.isEmpty())
+            .filter(token -> token.length() >= 2)  // 过滤单字
+            .filter(token -> !STOP_WORDS.contains(token.toLowerCase()))  // 过滤停用词
+            .map(String::toLowerCase)
+            .distinct()
+            .collect(Collectors.toList());
+        
+        log.debug("Extracted core keywords from '{}': {}", query, filtered);
+        return filtered;
     }
     
     /**

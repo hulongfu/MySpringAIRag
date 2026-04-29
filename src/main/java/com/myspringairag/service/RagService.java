@@ -28,6 +28,7 @@ public class RagService {
     private final QueryRewriteService queryRewriteService;
     private final HierarchicalChunkingService hierarchicalChunkingService;
     private final SseController sseController;
+    private final com.myspringairag.service.QueryTokenizationService tokenizationService;
     
     // 使用 ThreadLocal 存储当前任务的 taskId
     private static final ThreadLocal<String> currentTaskId = new ThreadLocal<>();
@@ -61,7 +62,8 @@ public class RagService {
             ChatClient.Builder chatClientBuilder,
             QueryRewriteService queryRewriteService,
             HierarchicalChunkingService hierarchicalChunkingService,
-            SseController sseController) {
+            SseController sseController,
+            com.myspringairag.service.QueryTokenizationService tokenizationService) {
         this.parserService = parserService;
         this.embeddingService = embeddingService;
         this.jVectorService = jVectorService;
@@ -70,6 +72,7 @@ public class RagService {
         this.queryRewriteService = queryRewriteService;
         this.hierarchicalChunkingService = hierarchicalChunkingService;
         this.sseController = sseController;
+        this.tokenizationService = tokenizationService;
     }
     
     /**
@@ -256,6 +259,15 @@ public class RagService {
                 List<com.myspringairag.model.ScoredDocument> scoredDocs = 
                     parallelRetrievalService.parallelSearch(rewrittenQuery, searchTopK);
                 
+                // 打印每个文档的相似度分数
+                log.info("=== Vector Search Results with Scores ===");
+                for (int i = 0; i < scoredDocs.size(); i++) {
+                    com.myspringairag.model.ScoredDocument sd = scoredDocs.get(i);
+                    log.info("Rank {}: docId={}, originalScore={}, rrfScore={}, finalScore={}",
+                        i+1, sd.getId(), sd.getOriginalScore(), sd.getRrfScore(), sd.getFinalScore());
+                }
+                log.info("===========================================");
+                
                 // 提取docId列表
                 vectorResults = scoredDocs.stream()
                     .map(com.myspringairag.model.ScoredDocument::getId)
@@ -276,6 +288,10 @@ public class RagService {
             if (vectorResults.isEmpty()) {
                 return "抱歉，我在知识库中没有找到相关的信息来回答您的问题。";
             }
+            
+            // 提取核心关键词
+            List<String> coreKeywords = tokenizationService.extractCoreKeywords(rewrittenQuery);
+            log.info("Core keywords for filtering: {}", coreKeywords);
                 
             List<Document> finalDocs;
                 
@@ -286,6 +302,16 @@ public class RagService {
                             
                 // 获取候选文档内容
                 List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
+                
+                // 关键词过滤
+                if (!coreKeywords.isEmpty()) {
+                    candidateDocs = filterByKeywords(candidateDocs, coreKeywords);
+                    log.info("After keyword filtering: {} documents", candidateDocs.size());
+                    
+                    if (candidateDocs.isEmpty()) {
+                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
+                    }
+                }
                             
                 // 打印候选文档信息
                 log.info("=== Candidate Documents ===");
@@ -311,21 +337,47 @@ public class RagService {
                 log.info("Reranking completed, scores: {}", rankedScores);
                             
                 // 取 top-K
+                List<Document> finalCandidateDocs = candidateDocs;
                 finalDocs = rankedScores.entrySet().stream()
                     .limit(topK)
-                    .map(entry -> findDocByContent(candidateDocs, entry.getKey()))
+                    .map(entry -> findDocByContent(finalCandidateDocs, entry.getKey()))
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
                             
                 log.info("After reranking: {} documents selected", finalDocs.size());
             } else {
                 // 不使用重排序，直接使用向量检索结果
-                finalDocs = documentRepository.findByIds(vectorResults.subList(0, Math.min(topK, vectorResults.size())));
+                List<Document> candidateDocs = documentRepository.findByIds(vectorResults.subList(0, Math.min(topK, vectorResults.size())));
+                
+                // 关键词过滤
+                if (!coreKeywords.isEmpty()) {
+                    candidateDocs = filterByKeywords(candidateDocs, coreKeywords);
+                    log.info("After keyword filtering: {} documents", candidateDocs.size());
+                    
+                    if (candidateDocs.isEmpty()) {
+                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
+                    }
+                }
+                
+                finalDocs = candidateDocs;
             }
                 
             if (finalDocs.isEmpty()) {
                 return "抱歉，我在知识库中没有找到相关的信息来回答您的问题。";
             }
+            
+            // 打印最终用于生成答案的文档及其分数
+            log.info("=== Final Documents for Answer Generation ===");
+            for (int i = 0; i < finalDocs.size(); i++) {
+                Document doc = finalDocs.get(i);
+                String contentPreview = doc.getParentContent() != null ? 
+                    doc.getParentContent() : doc.getContent();
+                log.info("Doc {}: id={}, filename={}, chunk={}/{}, preview={}",
+                    i+1, doc.getId(), doc.getFilename(), 
+                    doc.getChunkIndex()+1, doc.getTotalChunks(),
+                    contentPreview.substring(0, Math.min(150, contentPreview.length())));
+            }
+            log.info("================================================");
                 
             // 5. 构建上下文
             String context = buildContext(finalDocs);
@@ -454,6 +506,50 @@ public class RagService {
      */
     public List<Document> getDocumentChunks(String filename) {
         return documentRepository.findByFilename(filename);
+    }
+    
+    /**
+     * 根据关键词过滤文档（分级匹配策略）
+     * @param candidates 候选文档列表
+     * @param keywords 核心关键词列表
+     * @return 过滤后的文档列表
+     */
+    private List<Document> filterByKeywords(List<Document> candidates, List<String> keywords) {
+        if (keywords.isEmpty() || candidates.isEmpty()) {
+            return candidates;
+        }
+        
+        int minMatchCount = Math.max(keywords.size() / 2, 1);  // 至少匹配一半的关键词
+        log.debug("Keyword filtering: require at least {} matches from {} keywords", minMatchCount, keywords.size());
+        
+        // 按匹配的关键词数量分组（降序）
+        Map<Integer, List<Document>> grouped = new TreeMap<>(Collections.reverseOrder());
+        
+        for (Document doc : candidates) {
+            String content = (doc.getParentContent() != null ? doc.getParentContent() : doc.getContent()).toLowerCase();
+            int matchCount = 0;
+            
+            for (String keyword : keywords) {
+                if (content.contains(keyword.toLowerCase())) {
+                    matchCount++;
+                }
+            }
+            
+            grouped.computeIfAbsent(matchCount, k -> new ArrayList<>()).add(doc);
+        }
+        
+        // 从最高匹配数开始查找，返回第一个满足最低阈值的组
+        for (int matchCount : grouped.keySet()) {
+            if (matchCount >= minMatchCount) {
+                log.info("Found {} documents with {} matching keywords (required: {})", 
+                    grouped.get(matchCount).size(), matchCount, minMatchCount);
+                return grouped.get(matchCount);
+            }
+        }
+        
+        // 如果没有找到足够匹配的文档，返回空列表
+        log.warn("No documents found with at least {} matching keywords", minMatchCount);
+        return Collections.emptyList();
     }
     
     /**
