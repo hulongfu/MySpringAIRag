@@ -109,13 +109,14 @@ public class DocumentParserService {
         
         if (filename.endsWith(".pdf")) {
             return new PDFParser();
-        } else if (filename.endsWith(".doc") || filename.endsWith(".docx")) {
-            return new OfficeParser();
         } else if (filename.endsWith(".txt") || filename.endsWith(".md")) {
             return null; // 使用默认解析器
         }
         
-        return null; // 使用 Tika 自动检测
+        // 对于 Office 文档（.doc, .docx, .xls, .xlsx, .ppt, .pptx 等）
+        // 返回 null，让 Tika 自动检测并选择正确的解析器
+        // 这样可以正确处理 Office 2003 (.doc) 和 Office 2007+ (.docx) 格式
+        return null;
     }
     
     public List<String> splitIntoChunks(String text) {
