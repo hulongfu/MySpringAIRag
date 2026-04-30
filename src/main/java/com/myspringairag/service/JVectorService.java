@@ -181,6 +181,57 @@ public class JVectorService {
         // 索引在应用启动时从数据库重建，无需额外文件持久化
     }
     
+    /**
+     * 批量添加向量（不重建索引，由调用方控制何时重建）
+     * @param docIds 文档ID列表
+     * @param vectors 向量列表
+     */
+    public synchronized void addVectorsBatch(List<Long> docIds, List<float[]> vectors) {
+        if (docIds == null || docIds.isEmpty() || vectors == null || vectors.isEmpty()) {
+            return;
+        }
+        
+        if (docIds.size() != vectors.size()) {
+            throw new IllegalArgumentException("docIds and vectors must have the same size");
+        }
+        
+        try {
+            // 添加到内存列表
+            for (int i = 0; i < vectors.size(); i++) {
+                allVectors.add(vectors.get(i));
+                int nodeId = allVectors.size() - 1;
+                nodeIdToDocIdMap.put(nodeId, docIds.get(i));
+            }
+            
+            // 批量持久化到数据库
+            persistVectorsBatch(docIds, vectors);
+            
+            // ⚠️ 注意：这里不调用 buildIndex()
+            // 由调用方在添加完所有向量后手动调用 rebuildIndex()
+            
+            log.info("Added {} vectors to memory (index not rebuilt yet)", vectors.size());
+            
+        } catch (Exception e) {
+            log.error("Failed to add vectors batch", e);
+            throw new RuntimeException("Add vectors batch failed", e);
+        }
+    }
+    
+    /**
+     * 手动触发索引重建（批量添加后调用）
+     */
+    public synchronized void rebuildIndex() {
+        if (!allVectors.isEmpty()) {
+            long startTime = System.currentTimeMillis();
+            buildIndex();
+            long duration = System.currentTimeMillis() - startTime;
+            log.info("Index rebuilt successfully with {} vectors in {}ms", 
+                allVectors.size(), duration);
+        } else {
+            log.warn("No vectors to build index");
+        }
+    }
+    
     public synchronized void addVector(Long docId, float[] vectorArray) {
         try {
             // 添加到内存列表
@@ -191,7 +242,7 @@ public class JVectorService {
             // 持久化到数据库
             persistVector(docId, vectorArray);
             
-            // 重建索引
+            // 重建索引（单个向量添加时仍需要重建）
             buildIndex();
             
         } catch (Exception e) {
@@ -211,6 +262,99 @@ public class JVectorService {
         } catch (Exception e) {
             log.error("Failed to persist vector for docId={}", docId, e);
             throw new RuntimeException("Vector persistence failed", e);
+        }
+    }
+    
+    /**
+     * 批量持久化向量（性能优化）
+     * @param docIds 文档ID列表
+     * @param vectors 向量列表
+     */
+    public void persistVectorsBatch(List<Long> docIds, List<float[]> vectors) {
+        if (docIds == null || docIds.isEmpty() || vectors == null || vectors.isEmpty()) {
+            return;
+        }
+        
+        try {
+            String sql = "INSERT INTO vectors (doc_id, vector_data, dimension) VALUES (?, ?, ?)";
+            
+            // 简化实现：在事务中逐条插入（H2会自动优化）
+            for (int i = 0; i < docIds.size(); i++) {
+                byte[] vectorBytes = serializeVector(vectors.get(i));
+                jdbcTemplate.update(sql, docIds.get(i), vectorBytes, vectors.get(i).length);
+            }
+            
+            log.debug("Batch persisted {} vectors", docIds.size());
+        } catch (Exception e) {
+            log.error("Failed to batch persist vectors", e);
+            throw new RuntimeException("Batch vector persistence failed", e);
+        }
+    }
+    
+    /**
+     * 真正的批量INSERT（使用JDBC Batch API）
+     * 适用于大批量场景（>1000个向量）或远程数据库
+     * @param docIds 文档ID列表
+     * @param vectors 向量列表
+     * @return 成功插入的记录数
+     */
+    public int persistVectorsBatchWithJdbcBatch(List<Long> docIds, List<float[]> vectors) {
+        if (docIds == null || docIds.isEmpty() || vectors == null || vectors.isEmpty()) {
+            return 0;
+        }
+        
+        if (docIds.size() != vectors.size()) {
+            throw new IllegalArgumentException("docIds and vectors must have the same size");
+        }
+        
+        try {
+            String sql = "INSERT INTO vectors (doc_id, vector_data, dimension) VALUES (?, ?, ?)";
+            
+            // 使用JDBC Batch API进行真正的批量插入
+            int[] batchResults = jdbcTemplate.batchUpdate(sql, new org.springframework.jdbc.core.BatchPreparedStatementSetter() {
+                @Override
+                public void setValues(java.sql.PreparedStatement ps, int i) throws java.sql.SQLException {
+                    try {
+                        byte[] vectorBytes = serializeVector(vectors.get(i));
+                        ps.setLong(1, docIds.get(i));
+                        ps.setBytes(2, vectorBytes);
+                        ps.setInt(3, vectors.get(i).length);
+                    } catch (java.io.IOException e) {
+                        throw new java.sql.SQLException("Failed to serialize vector at index " + i, e);
+                    }
+                }
+                
+                @Override
+                public int getBatchSize() {
+                    return docIds.size();
+                }
+            });
+            
+            int successCount = 0;
+            for (int result : batchResults) {
+                if (result > 0) {
+                    successCount++;
+                }
+            }
+            
+            log.info("JDBC batch persisted {} vectors, success: {}/{}", 
+                docIds.size(), successCount, batchResults.length);
+            
+            return successCount;
+            
+        } catch (org.springframework.dao.DataAccessException e) {
+            log.error("Failed to JDBC batch persist vectors", e);
+            
+            // 尝试从异常中提取详细信息
+            if (e.getCause() instanceof java.sql.BatchUpdateException) {
+                java.sql.BatchUpdateException batchEx = (java.sql.BatchUpdateException) e.getCause();
+                int[] updateCounts = batchEx.getUpdateCounts();
+                log.error("Batch update failed. Completed: {} records, Failed at index: {}",
+                    updateCounts.length, 
+                    updateCounts.length < docIds.size() ? updateCounts.length : -1);
+            }
+            
+            throw new RuntimeException("JDBC batch vector persistence failed", e);
         }
     }
     

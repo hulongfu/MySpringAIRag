@@ -195,7 +195,10 @@ public class RagService {
             sseController.notifyProgress(taskId, 60, "正在生成向量...");
         }
         
-        // 3. 为每个chunk生成向量并存储
+        // 3. 批量生成向量并收集docIds
+        List<Long> docIds = new ArrayList<>();
+        List<float[]> vectors = new ArrayList<>();
+        
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
             
@@ -213,19 +216,34 @@ public class RagService {
             doc.setMimeType(mimeType);
             
             Document savedDoc = documentRepository.save(doc);
+            docIds.add(savedDoc.getId());
             
             // 生成向量（对小快content生成向量）
             float[] vector = embeddingService.embed(chunk);
-            
-            // 添加到JVector索引
-            jVectorService.addVector(savedDoc.getId(), vector);
+            vectors.add(vector);
             
             log.debug("Processed chunk {}/{} for {}", i + 1, chunks.size(), filename);
         }
         
-        // 90% - 向量化和存储完成
+        // 70% - 向量化完成
         if (taskId != null) {
-            sseController.notifyProgress(taskId, 90, "正在构建向量索引...");
+            sseController.notifyProgress(taskId, 70, "正在批量存储向量...");
+        }
+        
+        // 4. 批量添加到JVector索引（不重建索引）
+        jVectorService.addVectorsBatch(docIds, vectors);
+        
+        // 80% - 向量存储完成
+        if (taskId != null) {
+            sseController.notifyProgress(taskId, 80, "正在构建向量索引...");
+        }
+        
+        // 5. 一次性重建索引（性能优化关键！）
+        jVectorService.rebuildIndex();
+        
+        // 90% - 索引构建完成
+        if (taskId != null) {
+            sseController.notifyProgress(taskId, 90, "索引构建完成...");
         }
         
         log.info("Successfully uploaded and indexed document: {} ({} chunks)", filename, chunks.size());
