@@ -3,12 +3,12 @@ package com.myspringairag.service;
 import com.myspringairag.model.ScoredDocument;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 /**
@@ -30,8 +30,12 @@ public class ParallelVectorRetrievalService {
     @Autowired
     private com.myspringairag.service.QueryTokenizationService tokenizationService;
     
-    // 线程池（用于并行执行多个查询）
-    private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    // 注入统一的并行计算线程池
+    private final ExecutorService executor;
+    
+    public ParallelVectorRetrievalService(@Qualifier("parallelComputeExecutor") ExecutorService executor) {
+        this.executor = executor;
+    }
     
     /**
      * 多查询变体并行检索

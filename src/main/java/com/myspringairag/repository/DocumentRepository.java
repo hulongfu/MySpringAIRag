@@ -48,18 +48,27 @@ public class DocumentRepository {
         String sql = "INSERT INTO documents (filename, content, parent_content, chunk_index, total_chunks, file_size, mime_type) " +
                     "VALUES (?, ?, ?, ?, ?, ?, ?)";
         
-        jdbcTemplate.update(sql, 
-            document.getFilename(),
-            document.getContent(),
-            document.getParentContent(),  // 添加parentContent
-            document.getChunkIndex(),
-            document.getTotalChunks(),
-            document.getFileSize(),
-            document.getMimeType()
-        );
+        // 使用KeyHolder获取自增ID
+        org.springframework.jdbc.support.KeyHolder keyHolder = 
+            new org.springframework.jdbc.support.GeneratedKeyHolder();
         
-        // 获取最后插入的ID
-        Long id = jdbcTemplate.queryForObject("SELECT MAX(id) FROM documents", Long.class);
+        jdbcTemplate.update(connection -> {
+            java.sql.PreparedStatement ps = connection.prepareStatement(
+                sql, 
+                new String[]{"id"}  // ← 明确指定只返回id列
+            );
+            ps.setString(1, document.getFilename());
+            ps.setString(2, document.getContent());
+            ps.setString(3, document.getParentContent());
+            ps.setInt(4, document.getChunkIndex());
+            ps.setInt(5, document.getTotalChunks());
+            ps.setLong(6, document.getFileSize());
+            ps.setString(7, document.getMimeType());
+            return ps;
+        }, keyHolder);
+        
+        // 获取生成的ID
+        Long id = keyHolder.getKey().longValue();
         document.setId(id);
         return document;
     }

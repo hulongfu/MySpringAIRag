@@ -129,6 +129,14 @@ public class RagService {
         try {
             log.info("Uploading document from path: {}", filePath);
             
+            // 0. 检查文件是否已存在
+            List<Document> existingDocs = documentRepository.findByFilename(filename);
+            if (!existingDocs.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "文件已存在：" + filename + "。请先删除旧文档后再上传。"
+                );
+            }
+            
             // 10% - 开始读取文件
             if (taskId != null) {
                 sseController.notifyProgress(taskId, 10, "正在读取文件...");
@@ -195,10 +203,11 @@ public class RagService {
             sseController.notifyProgress(taskId, 60, "正在生成向量...");
         }
         
-        // 3. 批量生成向量并收集docIds
+        // 3. 批量生成向量并收集docIds（优化：先保存文档，再批量生成向量）
         List<Long> docIds = new ArrayList<>();
-        List<float[]> vectors = new ArrayList<>();
+        List<String> chunksToEmbed = new ArrayList<>();
         
+        // 第1步：保存所有文档到数据库
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
             
@@ -217,13 +226,18 @@ public class RagService {
             
             Document savedDoc = documentRepository.save(doc);
             docIds.add(savedDoc.getId());
+            chunksToEmbed.add(chunk);
             
-            // 生成向量（对小快content生成向量）
-            float[] vector = embeddingService.embed(chunk);
-            vectors.add(vector);
-            
-            log.debug("Processed chunk {}/{} for {}", i + 1, chunks.size(), filename);
+            log.debug("Saved chunk {}/{} for {}", i + 1, chunks.size(), filename);
         }
+        
+        // 65% - 文档保存完成
+        if (taskId != null) {
+            sseController.notifyProgress(taskId, 65, "正在批量生成向量...");
+        }
+        
+        // 第2步：批量生成向量（并行优化）
+        List<float[]> vectors = embeddingService.embedBatch(chunksToEmbed);
         
         // 70% - 向量化完成
         if (taskId != null) {
