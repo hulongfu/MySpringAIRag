@@ -34,7 +34,7 @@ spring:
   ai:
     # Chat model uses SiliconFlow API
     openai:
-      api-key: 你的API Key
+      api-key: 你的api key
       base-url: https://api.siliconflow.cn
       chat:
         options:
@@ -65,8 +65,14 @@ app:
   reranker-model-path: D:/ideaSpace/MyPython/models/bge-reranker-v2-m3-ONNX  # 重排序模型路径
   use-parallel-retrieval: true  # 启用并行多查询变体检索
 
-# Logging
+# Logging Configuration
 logging:
   level:
-    com.myspringairag: DEBUG
-    org.springframework.ai: INFO
+    root: WARN
+    com.myspringairag: INFO
+    com.myspringairag.service: INFO
+    com.myspringairag.controller: INFO
+    com.myspringairag.repository: WARN
+    org.springframework.ai: WARN
+    org.springframework.web: WARN
+    io.github.jbellis: WARN

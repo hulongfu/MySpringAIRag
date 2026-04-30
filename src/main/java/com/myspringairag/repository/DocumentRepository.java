@@ -121,11 +121,8 @@ public class DocumentRepository {
         String[] keywords = tokenizationService.tokenize(query);
         
         if (keywords.length == 0) {
-            log.debug("No keywords extracted from query: {}", query);
             return List.of();
         }
-        
-        log.debug("Extracted keywords: {}", String.join(", ", keywords));
         
         // 构建LIKE查询
         StringBuilder sqlBuilder = new StringBuilder();
@@ -149,8 +146,6 @@ public class DocumentRepository {
         
         try {
             List<Long> results = jdbcTemplate.queryForList(sqlBuilder.toString(), Long.class, params);
-            log.debug("Keyword search SQL: {}", sqlBuilder.toString());
-            log.debug("Keyword search params: {}", java.util.Arrays.toString(params));
             return results;
         } catch (Exception e) {
             log.error("Keyword search failed: {}", e.getMessage());

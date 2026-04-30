@@ -78,7 +78,6 @@ public class DocumentParserService {
         
         // 对于.txt和.md文件，直接使用UTF-8读取
         if (filename.endsWith(".txt") || filename.endsWith(".md")) {
-            log.debug("Reading {} with UTF-8 encoding", filePath.getFileName());
             return new String(Files.readAllBytes(filePath), java.nio.charset.StandardCharsets.UTF_8);
         }
         
@@ -100,7 +99,6 @@ public class DocumentParserService {
         }
         
         String text = handler.toString();
-        log.debug("Extracted {} characters from {}", text.length(), filePath.getFileName());
         return text;
     }
     
@@ -151,28 +149,9 @@ public class DocumentParserService {
             .map(TextChunk::getContent)
             .collect(Collectors.toList());
         
-        // 调试：检查是否包含特定关键词
-        boolean hasOllama = chunkTexts.stream().anyMatch(c -> c.toLowerCase().contains("ollama"));
-        boolean hasHuawei = chunkTexts.stream().anyMatch(c -> c.contains("华为"));
-        log.info("Chunk check - contains 'ollama': {}, contains '华为': {}", hasOllama, hasHuawei);
-        
         log.info("Split text into {} chunks", chunkTexts.size());
         return chunkTexts;
     }
-    
-    private String getOverlap(String text, int overlapSize) {
-        if (text.length() <= overlapSize) {
-            return text;
-        }
-        
-        // 从文本末尾提取重叠部分，尽量在句子边界处切断
-        String overlap = text.substring(text.length() - overlapSize);
-        int lastSentenceEnd = overlap.lastIndexOf('.');
-        
-        if (lastSentenceEnd > overlapSize / 2) {
-            return overlap.substring(lastSentenceEnd + 1).trim();
-        }
-        
-        return overlap.trim();
-    }
+
+
 }

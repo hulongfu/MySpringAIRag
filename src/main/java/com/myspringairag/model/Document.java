@@ -19,4 +19,5 @@ public class Document {
     private LocalDateTime uploadTime;
     private Long fileSize;
     private String mimeType;
+    private Double similarityScore;  // 相似度分数（用于排序）
 }

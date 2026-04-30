@@ -113,7 +113,6 @@ public class QueryTokenizationService {
             .distinct()
             .collect(Collectors.toList());
         
-        log.debug("Extracted core keywords from '{}': {}", query, filtered);
         return filtered;
     }
     

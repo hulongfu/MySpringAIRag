@@ -175,13 +175,10 @@ public class JVectorService {
     }
     
     /**
-     * 保存索引到文件
+     * 保存索引到文件（当前实现为从数据库重建，无需文件持久化）
      */
     private void saveIndex() throws IOException {
-        Path indexFile = Paths.get(indexPath, "jvector_index");
-        // 注意：GraphIndexBuilder没有save方法，需要其他方式持久化
-        // 这里简化处理，每次启动时从数据库重建
-        log.debug("Index persistence skipped (rebuild from DB on startup)");
+        // 索引在应用启动时从数据库重建，无需额外文件持久化
     }
     
     public synchronized void addVector(Long docId, float[] vectorArray) {
@@ -197,8 +194,6 @@ public class JVectorService {
             // 重建索引
             buildIndex();
             
-            log.debug("Added vector for docId={}, total vectors={}", docId, allVectors.size());
-            
         } catch (Exception e) {
             log.error("Failed to add vector for docId={}", docId, e);
             throw new RuntimeException("Add vector failed", e);
@@ -213,7 +208,6 @@ public class JVectorService {
             byte[] vectorBytes = serializeVector(vector);
             String sql = "INSERT INTO vectors (doc_id, vector_data, dimension) VALUES (?, ?, ?)";
             jdbcTemplate.update(sql, docId, vectorBytes, vector.length);
-            log.debug("Persisted vector for docId={} to database", docId);
         } catch (Exception e) {
             log.error("Failed to persist vector for docId={}", docId, e);
             throw new RuntimeException("Vector persistence failed", e);
@@ -275,20 +269,12 @@ public class JVectorService {
                 .limit(topK)
                 .collect(Collectors.toList());
             
-            log.debug("JVector search returned {} results", docIds.size());
             return docIds;
             
         } catch (Exception e) {
             log.error("JVector search failed", e);
             return Collections.emptyList();
         }
-    }
-    
-    /**
-     * 使用默认topK进行搜索
-     */
-    public synchronized List<Long> search(float[] queryVectorArray) {
-        return search(queryVectorArray, this.topK);
     }
     
     /**
@@ -363,7 +349,6 @@ public class JVectorService {
                     LinkedHashMap::new
                 ));
             
-            log.debug("JVector search with scores returned {} results", docScores.size());
             return docScores;
             
         } catch (Exception e) {
@@ -417,7 +402,6 @@ public class JVectorService {
         try {
             String sql = "DELETE FROM vectors WHERE doc_id = ?";
             jdbcTemplate.update(sql, docId);
-            log.debug("Removed vector from database for docId={}", docId);
         } catch (Exception e) {
             log.error("Failed to remove vector from database for docId={}", docId, e);
         }

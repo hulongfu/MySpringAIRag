@@ -53,7 +53,6 @@ public class EmbeddingService {
         // 检查缓存
         synchronized (embeddingCache) {
             if (embeddingCache.containsKey(text)) {
-                log.debug("Cache hit for text: {}", text.substring(0, Math.min(30, text.length())));
                 return embeddingCache.get(text).clone(); // 返回副本，避免外部修改
             }
         }
@@ -73,7 +72,6 @@ public class EmbeddingService {
                 embeddingCache.put(text, vector.clone());
             }
             
-            log.debug("Generated embedding with dimension: {}", vector.length);
             return vector;
         } catch (Exception e) {
             log.error("Failed to generate embedding for text: {}", text.substring(0, Math.min(50, text.length())), e);
@@ -91,7 +89,6 @@ public class EmbeddingService {
         
         try {
             List<float[]> embeddings = embeddingModel.embed(texts);
-            log.debug("Generated {} embeddings", embeddings.size());
             return embeddings;
         } catch (Exception e) {
             log.error("Failed to generate batch embeddings", e);

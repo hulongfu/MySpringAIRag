@@ -70,8 +70,6 @@ public class ParallelVectorRetrievalService {
             .filter(result -> !result.isEmpty())
             .collect(Collectors.toList());
         
-        log.debug("Retrieved results from {} variants", allResults.size());
-        
         // 5. RRF融合
         List<ScoredDocument> merged = mergeScoresWithRRF(allResults, topK);
         
@@ -119,7 +117,6 @@ public class ParallelVectorRetrievalService {
         // 根据查询长度动态限制变体数量
         int maxVariants = getOptimalVariantCount(originalQuery);
         List<String> result = variants.stream().distinct().limit(maxVariants).collect(Collectors.toList());
-        log.debug("Generated {} variants (max: {}): {}", result.size(), maxVariants, result);
         return result;
     }
     
@@ -372,8 +369,6 @@ public class ParallelVectorRetrievalService {
             .sorted(Comparator.comparingDouble(ScoredDocument::getFinalScore).reversed())
             .limit(topK)
             .collect(Collectors.toList());
-        
-        log.debug("RRF fusion: {} unique docs -> {} after limit", allDocIds.size(), scoredDocs.size());
         
         return scoredDocs;
     }

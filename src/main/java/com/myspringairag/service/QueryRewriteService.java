@@ -28,11 +28,10 @@ public class QueryRewriteService {
         
         // 3. 如果变化不大，返回原始查询（避免过度处理）
         if (restructured.equals(cleaned) || restructured.length() < cleaned.length() / 2) {
-            log.debug("Query rewrite unchanged, using original: {}", cleaned);
             return cleaned;
         }
         
-        log.debug("Query rewritten: '{}' -> '{}'", userQuery, restructured);
+        log.info("Query rewritten: '{}' -> '{}'", userQuery, restructured);
         return restructured;
     }
     

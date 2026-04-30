@@ -75,8 +75,6 @@ public class HierarchicalChunkingService {
             } else {
                 // 大块需要二次切分成小块
                 List<String> smallChunks = splitLargeChunkToSmallChunks(largeChunkText);
-                log.debug("Large chunk ({} tokens) split into {} small chunks", 
-                    largeChunkTokens, smallChunks.size());
                 
                 for (String smallChunk : smallChunks) {
                     org.springframework.ai.document.Document doc = new org.springframework.ai.document.Document(

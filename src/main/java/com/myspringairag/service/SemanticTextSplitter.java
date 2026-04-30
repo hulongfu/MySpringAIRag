@@ -3,13 +3,11 @@ package com.myspringairag.service;
 import com.myspringairag.model.TextChunk;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.embedding.EmbeddingResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.text.BreakIterator;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -33,32 +31,32 @@ public class SemanticTextSplitter {
         StringBuilder currentChunk = new StringBuilder();
         int currentTokens = 0;
         int chunkIndex = 0;
-        
+
         for (String sentence : sentences) {
             int sentenceTokens = estimateTokenCount(sentence);
-            
+
             if (currentTokens + sentenceTokens > maxChunkTokens && currentTokens > 0) {
                 String chunkText = currentChunk.toString().trim();
                 String chunkId = docId + "_" + chunkIndex++;
                 chunks.add(new TextChunk(chunkId, docId, chunkIndex, chunkText, currentTokens));
-                
+
                 // 重叠处理：保留最后 overlapTokens 字符（近似）
                 int overlapChars = Math.min(overlapTokens * 4, chunkText.length());
                 String overlapText = chunkText.substring(Math.max(0, chunkText.length() - overlapChars));
                 currentChunk = new StringBuilder(overlapText);
                 currentTokens = estimateTokenCount(overlapText);
             }
-            
+
             currentChunk.append(sentence).append(" ");
             currentTokens += sentenceTokens;
         }
-        
+
         if (currentChunk.length() > 0) {
             String chunkText = currentChunk.toString().trim();
             String chunkId = docId + "_" + chunkIndex;
             chunks.add(new TextChunk(chunkId, docId, chunkIndex, chunkText, currentTokens));
         }
-        
+
         log.info("Fixed-size splitting: {} sentences -> {} chunks", sentences.size(), chunks.size());
         return chunks;
     }
@@ -102,15 +100,12 @@ public class SemanticTextSplitter {
                 
                 // 语义相似度低于阈值 或 超过最大句子数 或 超过最大 token 数
                 if (sim < similarityThreshold) {
-                    log.debug("Breaking at sentence {}: similarity={:.3f}", i, sim);
                     forceBreak = true;
                 }
                 if (currentGroup.size() >= maxSentencesPerChunk) {
-                    log.debug("Breaking at sentence {}: max sentences reached", i);
                     forceBreak = true;
                 }
                 if (currentTokens + sentenceTokens > maxChunkTokens) {
-                    log.debug("Breaking at sentence {}: max tokens reached", i);
                     forceBreak = true;
                 }
                 

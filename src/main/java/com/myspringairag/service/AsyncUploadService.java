@@ -53,8 +53,6 @@ public class AsyncUploadService {
         Path tempFile = uploadPath.resolve(tempFilename);
         file.transferTo(tempFile.toFile());
         
-        log.debug("Temp file saved to: {}", tempFile);
-        
         // 3. 提交异步任务（使用前端传来的taskId）
         processDocument(taskId, tempFile, originalFilename);
         
@@ -75,8 +73,6 @@ public class AsyncUploadService {
         String tempFilename = "temp_" + timestamp + "_" + originalFilename;
         Path tempFile = uploadPath.resolve(tempFilename);
         file.transferTo(tempFile.toFile());
-        
-        log.debug("Temp file saved to: {}", tempFile);
         
         // 3. 生成任务ID
         String taskId = UUID.randomUUID().toString();
@@ -116,14 +112,12 @@ public class AsyncUploadService {
             // 清理临时文件
             try {
                 Files.deleteIfExists(tempFile);
-                log.debug("Temp file deleted: {}", tempFile);
             } catch (IOException e) {
                 log.warn("Failed to delete temp file: {}", tempFile, e);
             }
             
             // 释放信号量
             uploadSemaphore.release();
-            log.info("Task {} finished, semaphore released", taskId);
         }
     }
 }
