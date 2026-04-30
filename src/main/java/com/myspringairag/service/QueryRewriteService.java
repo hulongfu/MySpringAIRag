@@ -54,15 +54,10 @@ public class QueryRewriteService {
      */
     private String restructureQuestion(String query) {
         // 模式1: "XXX如何YYY" → "XXX YYY 的方法"
-        if (query.contains("如何") || query.contains("怎么") || query.contains("怎样")) {
+        if (query.contains("如何") || query.contains("怎么样") || query.contains("怎么") || query.contains("怎样")) {
             String result = query
-                .replaceAll("(如何|怎么|怎样)", "")
+                .replaceAll("(如何|怎么样|怎么|怎样)", "")
                 .trim();
-            
-            // 如果结果不以"方法"、"步骤"等结尾，添加"的方法"
-            if (!result.matches(".*(?:方法|步骤|教程|指南|配置|安装|部署|方式)$")) {
-                result = result + "的方法";
-            }
             
             return result;
         }
@@ -72,15 +67,8 @@ public class QueryRewriteService {
             String result = query
                 .replaceAll("(是什么|是什么意思)[？?]?$", "")
                 .trim();
-            
-            // 如果包含"方式"、"方法"、"步骤"等词，保留并优化
-            if (result.matches(".*(?:方式|方法|步骤|教程|指南).*$")) {
-                // 例如："启动open-webui的两种方式" → 保持不变或简化
-                return result;
-            } else {
-                // 其他情况：添加"说明"或"介绍"
-                return result + "的说明";
-            }
+
+            return result;
         }
         
         // 模式3: 直接返回清理后的查询

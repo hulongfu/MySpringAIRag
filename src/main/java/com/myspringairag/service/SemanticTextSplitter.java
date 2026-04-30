@@ -20,6 +20,7 @@ public class SemanticTextSplitter {
     private static final int DEFAULT_OVERLAP_TOKENS = 100;
     private static final float DEFAULT_SIMILARITY_THRESHOLD = 0.7f;
     private static final int MAX_SENTENCES_PER_CHUNK = 20;
+    private static final int MIN_SENTENCES_PER_CHUNK = 3;  // 最小分块句子数
 
     /**
      * 固定大小分块（基于句子边界）
@@ -98,13 +99,15 @@ public class SemanticTextSplitter {
                 float sim = cosineSimilarity(emb, currentCentroid);
                 boolean forceBreak = false;
                 
-                // 语义相似度低于阈值 或 超过最大句子数 或 超过最大 token 数
-                if (sim < similarityThreshold) {
+                // 语义相似度低于阈值 且 已达到最小句子数，才允许断开
+                if (sim < similarityThreshold && currentGroup.size() >= MIN_SENTENCES_PER_CHUNK) {
                     forceBreak = true;
                 }
+                // 超过最大句子数，强制断开
                 if (currentGroup.size() >= maxSentencesPerChunk) {
                     forceBreak = true;
                 }
+                // 超过最大 token 数，强制断开
                 if (currentTokens + sentenceTokens > maxChunkTokens) {
                     forceBreak = true;
                 }

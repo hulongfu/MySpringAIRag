@@ -331,10 +331,10 @@ public class RagService {
                     Document doc = candidateDocs.get(i);
                     String contentPreview = doc.getParentContent() != null ? 
                         doc.getParentContent() : doc.getContent();
-                    log.info("Candidate {}: id={}, filename={}, chunk={}/{}, content_preview={}",
+                    log.info("Candidate {}: id={}, filename={}, chunk={}/{}, content_preview={}, similarityScore={}",
                         i+1, doc.getId(), doc.getFilename(), 
                         doc.getChunkIndex()+1, doc.getTotalChunks(),
-                        contentPreview.substring(0, Math.min(100, contentPreview.length())));
+                        contentPreview.substring(0, Math.min(100, contentPreview.length())), doc.getSimilarityScore());
                 }
                 log.info("===========================");
                             
@@ -507,7 +507,7 @@ public class RagService {
         if (keywords.isEmpty() || candidates.isEmpty()) {
             return candidates;
         }
-        
+        log.info("Keywords for score adjustment: {}", keywords);
         int totalKeywords = keywords.size();
         
         // 为每个文档计算新的相似度分数
@@ -527,6 +527,7 @@ public class RagService {
             
             // 计算新分数：originalScore * (matchedCount / totalKeywords)
             double newScore = originalScore * ((double) matchedCount / totalKeywords);
+            log.info("Adjusted score for doc {}: {}， originalScore: {}", doc.getId(), newScore, originalScore);
             doc.setSimilarityScore(newScore);
         }
         

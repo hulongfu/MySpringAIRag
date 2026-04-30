@@ -60,7 +60,7 @@ app:
   chunk-size: 500          # chunk最大token数
   chunk-overlap: 100       # 重叠token数
   use-semantic-chunking: true  # 启用语义分块
-  semantic-similarity-threshold: 0.65  # 降低阈值，允许更多细分
+  semantic-similarity-threshold: 0.85  # 提高阈值，确保语义一致性
   use-reranking: false     # 禁用重排序（节省性能）
   reranker-model-path: D:/ideaSpace/MyPython/models/bge-reranker-v2-m3-ONNX  # 重排序模型路径
   use-parallel-retrieval: true  # 启用并行多查询变体检索

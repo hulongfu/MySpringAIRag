@@ -1,6 +1,6 @@
 # MySpringAIRag - 智能RAG知识库问答系统
 
-基于 **JVector + H2 + Spring AI** 的轻量级 RAG（检索增强生成）应用，采用层级分块策略和并行多查询变体检索，显著提升检索准确性。
+基于 **JVector + H2 + Spring AI** 的轻量级 RAG（检索增强生成）应用，采用层级分块策略、并行多查询变体检索和关键词分数调整，显著提升检索准确性。
 
 ## 🎯 核心特性
 
@@ -10,12 +10,24 @@
 - 按行拆分，不切断代码、命令等关键信息
 - 小块之间重叠20 tokens，避免信息断裂
 
+✅ **语义分块优化** ⭐ NEW
+- 相似度阈值提升至 0.85，确保语义一致性
+- 最小分块保护：每块至少包含3个句子
+- 避免单句成块，提升分块质量
+- 自适应技术文档特点
+
 ✅ **并行多查询变体检索**  
 - 根据查询长度动态生成变体（<10字: 3个，10-20字: 5个，>20字: 6个）
 - 变体类型：原始查询、重写查询、核心实体提取、简化版、关键词扩展
 - 并行执行向量检索
 - RRF（Reciprocal Rank Fusion）融合多路结果
 - 显著提升召回率
+
+✅ **关键词分数调整** ⭐ NEW
+- 基于IK分词器提取核心关键词
+- 根据关键词匹配比例调整文档相似度分数
+- 公式：新分数 = 原分数 × (匹配关键词数 / 总关键词数)
+- 提升检索结果的相关性
 
 ✅ **本地Embedding模型**  
 - 使用 BGE-Small-ZH-v1.5 ONNX模型（384维）
@@ -255,7 +267,7 @@ app:
   chunk-size: 500           # 固定分块时使用（已弃用）
   chunk-overlap: 100        # 固定分块时使用（已弃用）
   use-semantic-chunking: true  # ✅ 启用层级分块
-  semantic-similarity-threshold: 0.65
+  semantic-similarity-threshold: 0.85  # ✅ 语义相似度阈值（提高至0.85）
   
   # 检索配置
   top-k: 5                  # 最终返回的文档数量
@@ -264,7 +276,6 @@ app:
   
   # 并行检索配置
   use-parallel-retrieval: true  # ✅ 启用并行多查询变体检索
-  parallel-query-variants: 5    # 生成5个查询变体
   
   # 文件上传配置
   upload-dir: D:/tmp/MySpringAIRag/uploads  # 临时文件存储路径
@@ -366,6 +377,8 @@ H2 控制台（调试用）：http://localhost:8080/h2-console
 - `SMALL_CHUNK_TOKENS = 200`：小块大小
 - `OVERLAP_TOKENS = 20`：重叠大小
 - `LONG_LINE_THRESHOLD = 300`：超长行阈值
+- `MIN_SENTENCES_PER_CHUNK = 3`：最小分块句子数 ⭐ NEW
+- `SIMILARITY_THRESHOLD = 0.85`：语义相似度阈值 ⭐ UPDATED
 
 **示例**：
 ```
@@ -407,7 +420,21 @@ RRF_Score(doc) = Σ (1 / (K + rank_i))
 其中 K=60, rank_i是doc在第i路检索中的排名
 ```
 
-### 3. EmbeddingService（本地Embedding服务）
+### 3. QueryTokenizationService（关键词提取服务）⭐ NEW
+
+**职责**：使用IK分词器提取查询的核心关键词
+
+**工作流程**：
+1. **中文分词**：使用IKAnalyzer进行智能分词
+2. **停用词过滤**：去除常见停用词
+3. **核心关键词提取**：保留名词、动词等实词
+4. **去重处理**：移除重复关键词
+
+**应用场景**：
+- 用于RagService中的关键词分数调整
+- 提升检索结果的相关性
+
+### 4. EmbeddingService（本地Embedding服务）
 
 **职责**：使用本地BGE模型生成向量
 
@@ -417,7 +444,7 @@ RRF_Score(doc) = Σ (1 / (K + rank_i))
 - 优势：无需API调用，完全离线
 - 劣势：首次加载较慢（约5秒）
 
-### 4. JVectorService（向量索引服务）
+### 5. JVectorService（向量索引服务）
 
 **职责**：管理JVector向量索引
 
@@ -458,12 +485,19 @@ RRF_Score(doc) = Σ (1 / (K + rank_i))
 - 建立新连接前自动关闭旧连接，防止内存泄漏
 - 收到 COMPLETED 事件后清空文件选择状态
 
+### 8. RagService（RAG核心服务）⭐ UPDATED
+
 **职责**：协调整个RAG流程
 
 **关键方法**：
 - `uploadDocument()`：上传文档并建立索引
 - `answerQuestion()`：回答问题
+  - 查询重写
+  - 并行多查询变体检索
+  - RRF融合
+  - **关键词分数调整** ⭐ NEW
 - `buildContext()`：构建上下文（优先返回parentContent）
+- `adjustScoreByKeywords()`：根据关键词匹配比例调整分数 ⭐ NEW
 
 ## ⚙️ 配置优化指南
 
@@ -472,8 +506,13 @@ RRF_Score(doc) = Σ (1 / (K + rank_i))
 ```yaml
 app:
   use-semantic-chunking: true  # 启用层级分块
-  semantic-similarity-threshold: 0.65  # 降低阈值→更多细分
+  semantic-similarity-threshold: 0.85  # ✅ 提高阈值，确保语义一致性（最新）
 ```
+
+**语义分块优化说明**：
+- **相似度阈值 0.85**：只有语义非常相近的句子才会被聚合到同一块
+- **最小分块保护**：每块至少包含3个句子，避免单句成块
+- **适用场景**：技术文档、API文档等需要完整上下文的场景
 
 ### 调整检索精度
 
@@ -495,7 +534,8 @@ app:
 | jvector.top-k | 50-100 | 10-20 |
 | parallel-query-variants | 5-7 | 2-3 |
 | use-reranking | true | false |
-| semantic-similarity-threshold | 0.5-0.6 | 0.7-0.8 |
+| semantic-similarity-threshold | 0.8-0.9 | 0.6-0.7 |
+| min-sentences-per-chunk | 3-5 | 1-2 |
 
 ## ⚠️ 注意事项
 
@@ -557,13 +597,30 @@ H2数据库不会自动更新已有表的结构。
 2. 查询表述不准确（尝试不同问法）
 3. 相似度阈值过高（降低`jvector.similarity-threshold`）
 4. 分块过大导致embedding稀释（启用层级分块）
+5. **关键词匹配度低** ⭐ NEW：查询中的核心关键词未在文档中出现
 
 **解决方案**：
 - 查看日志中的`=== Retrieved Context ===`部分
 - 检查是否召回了相关chunks
 - 调整`jvector.top-k`和`similarity-threshold`
+- **优化查询表述**，确保包含关键术语
 
-### Q2: 为什么parent_content为空？
+### Q2: 为什么分块内容太短？⭐ UPDATED
+
+**可能原因**：
+1. 语义相似度阈值过低（旧版本默认0.65）
+2. 缺少最小分块保护
+3. 技术文档中相邻句子语义差异较大
+
+**解决方案**：
+- ✅ **已优化**：相似度阈值提升至 0.85
+- ✅ **已优化**：添加最小分块保护（至少3个句子）
+- 如果仍有问题，可进一步调整：
+  ```yaml
+  semantic-similarity-threshold: 0.9  # 更严格的语义一致性
+  ```
+
+### Q3: 为什么parent_content为空？
 
 **可能原因**：
 1. 未启用层级分块（`use-semantic-chunking: false`）
@@ -573,7 +630,7 @@ H2数据库不会自动更新已有表的结构。
 - 确认配置文件中`use-semantic-chunking: true`
 - 检查`DocumentRepository.ROW_MAPPER`是否包含`doc.setParentContent(rs.getString("parent_content"))`
 
-### Q3: 应用启动很慢？
+### Q4: 应用启动很慢？
 
 **可能原因**：
 1. 本地Embedding模型加载慢（首次约5秒）
@@ -584,7 +641,7 @@ H2数据库不会自动更新已有表的结构。
 - 后续启动会快很多
 - 减少文档数量或优化分块策略
 
-### Q4: 如何查看数据库中存储的内容？
+### Q5: 如何查看数据库中存储的内容？
 
 使用H2控制台：
 ```sql
@@ -601,7 +658,7 @@ WHERE filename = 'AI应用开发-无名.txt'
 ORDER BY chunk_index;
 ```
 
-### Q5: 为什么上传同一个文件会被重复处理？
+### Q6: 为什么上传同一个文件会被重复处理？
 
 **可能原因**：
 1. 前端状态未正确清空（selectedFile 仍保留）
@@ -614,7 +671,7 @@ ORDER BY chunk_index;
 - 使用 Semaphore 防止并发处理同一文件
 - 刷新浏览器可以彻底清除所有状态
 
-### Q6: uploads 目录下有很多临时文件怎么办？
+### Q7: uploads 目录下有很多临时文件怎么办？
 
 **正常情况**：
 - 临时文件应该在处理完成后立即删除
@@ -625,7 +682,7 @@ ORDER BY chunk_index;
 - 可以手动删除 uploads 目录下的所有 `temp_*` 文件
 - 这些文件不影响已上传的文档（已存入 H2 数据库）
 
-### Q7: SSE 连接一直不关闭怎么办？
+### Q8: SSE 连接一直不关闭怎么办？
 
 **排查方法**：
 1. 打开浏览器开发者工具 → Network → EventStream
@@ -648,6 +705,8 @@ ORDER BY chunk_index;
 - [ ] 用户认证和权限管理
 - [ ] 迁移到 PostgreSQL + pgvector（生产环境）
 - [ ] 支持分布式部署
+- [x] ✅ 语义分块优化（相似度阈值 + 最小分块保护）⭐ NEW
+- [x] ✅ 关键词分数调整（IK分词 + 匹配比例）⭐ NEW
 
 ## 📄 许可证
 
@@ -659,13 +718,16 @@ MIT License
 
 ---
 
-**最后更新**: 2026-04-29  
-**版本**: 1.2.0  
+**最后更新**: 2026-04-30  
+**版本**: 1.3.0  
 **主要更新**:
 - ✅ 新增 SSE 实时进度推送功能（基于真实业务节点）
 - ✅ 新增并发控制（Semaphore）
 - ✅ 优化临时文件管理（自动清理）
 - ✅ 修复前端重复提交问题
-- ✅ 完善 SSE 连接管理（避免误报"连接中断"）
+- ✅ 完善 SSE 连接管理（避免误报“连接中断”）
 - ✅ 修复 Word 文档解析问题（支持 .doc 和 .docx）
 - ✅ 优化进度推送逻辑（移除伪延迟，基于实际业务节点）
+- ✅ **语义分块优化**：相似度阈值提升至 0.85，添加最小分块保护 ⭐ NEW
+- ✅ **关键词分数调整**：基于IK分词提取核心关键词，按匹配比例调整分数 ⭐ NEW
+- ✅ **删除冗余代码**：移除未使用的RRF融合方法和调试日志
