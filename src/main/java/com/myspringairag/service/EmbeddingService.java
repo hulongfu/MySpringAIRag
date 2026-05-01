@@ -99,14 +99,39 @@ public class EmbeddingService {
         try {
             long startTime = System.currentTimeMillis();
             
-            // 第1步：检查缓存，分离出需要计算的文本
-            List<String> toCompute = new ArrayList<>();
-            Map<String, Integer> textToIndex = new HashMap<>();
-            List<float[]> results = new ArrayList<>(Collections.nCopies(texts.size(), null));
-            int cachedCount = 0;
+            // 第0步：过滤空文本
+            List<String> filteredTexts = new ArrayList<>();
+            Map<Integer, Integer> originalIndexMap = new HashMap<>(); // 映射：过滤后索引 -> 原始索引
+            int emptyCount = 0;
             
             for (int i = 0; i < texts.size(); i++) {
                 String text = texts.get(i);
+                if (text != null && !text.trim().isEmpty()) {
+                    originalIndexMap.put(filteredTexts.size(), i);
+                    filteredTexts.add(text);
+                } else {
+                    log.warn("Skipping empty text at index {}", i);
+                    emptyCount++;
+                }
+            }
+            
+            if (emptyCount > 0) {
+                log.warn("Filtered out {} empty texts from batch of {}", emptyCount, texts.size());
+            }
+            
+            if (filteredTexts.isEmpty()) {
+                log.error("All texts are empty, returning empty result");
+                return new ArrayList<>();
+            }
+            
+            // 第1步：检查缓存，分离出需要计算的文本
+            List<String> toCompute = new ArrayList<>();
+            Map<String, Integer> textToIndex = new HashMap<>();
+            List<float[]> results = new ArrayList<>(Collections.nCopies(filteredTexts.size(), null));
+            int cachedCount = 0;
+            
+            for (int i = 0; i < filteredTexts.size(); i++) {
+                String text = filteredTexts.get(i);
                 float[] cached = embeddingCache.get(text);
                 if (cached != null) {
                     results.set(i, cached.clone());
@@ -117,8 +142,8 @@ public class EmbeddingService {
                 }
             }
             
-            log.debug("Embedding batch: total={}, cached={}, to_compute={}", 
-                texts.size(), cachedCount, toCompute.size());
+            log.debug("Embedding batch: total={}, empty={}, filtered={}, cached={}, to_compute={}", 
+                texts.size(), emptyCount, filteredTexts.size(), cachedCount, toCompute.size());
             
             // 第2步：如果没有需要计算的，直接返回
             if (toCompute.isEmpty()) {
@@ -139,6 +164,14 @@ public class EmbeddingService {
             for (int i = 0; i < toCompute.size(); i++) {
                 String text = toCompute.get(i);
                 float[] vector = computedVectors.get(i);
+                
+                // 安全检查：确保向量不为null
+                if (vector == null) {
+                    log.error("Embedding model returned null vector for text: {}", 
+                        text.substring(0, Math.min(50, text.length())));
+                    continue;
+                }
+                
                 int originalIndex = textToIndex.get(text);
                 results.set(originalIndex, vector);
                 
@@ -148,8 +181,8 @@ public class EmbeddingService {
             
             long duration = System.currentTimeMillis() - startTime;
             log.info("Batch embedding completed: {} texts in {}ms (cache hit rate: {}%)",
-                texts.size(), duration, 
-                texts.size() > 0 ? (cachedCount * 100 / texts.size()) : 0);
+                filteredTexts.size(), duration, 
+                filteredTexts.size() > 0 ? (cachedCount * 100 / filteredTexts.size()) : 0);
             
             return results;
             

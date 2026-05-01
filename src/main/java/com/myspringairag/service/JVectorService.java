@@ -188,6 +188,7 @@ public class JVectorService {
      */
     public synchronized void addVectorsBatch(List<Long> docIds, List<float[]> vectors) {
         if (docIds == null || docIds.isEmpty() || vectors == null || vectors.isEmpty()) {
+            log.warn("Empty docIds or vectors list");
             return;
         }
         
@@ -196,20 +197,45 @@ public class JVectorService {
         }
         
         try {
-            // 添加到内存列表
+            // 过滤掉null向量
+            List<Long> validDocIds = new ArrayList<>();
+            List<float[]> validVectors = new ArrayList<>();
+            int skipCount = 0;
+            
             for (int i = 0; i < vectors.size(); i++) {
-                allVectors.add(vectors.get(i));
+                float[] vector = vectors.get(i);
+                if (vector == null) {
+                    log.warn("Skipping null vector at index {} for docId {}", i, docIds.get(i));
+                    skipCount++;
+                    continue;
+                }
+                validDocIds.add(docIds.get(i));
+                validVectors.add(vector);
+            }
+            
+            if (validVectors.isEmpty()) {
+                log.error("All vectors are null, cannot add to index");
+                return;
+            }
+            
+            if (skipCount > 0) {
+                log.warn("Filtered out {} null vectors, remaining: {}", skipCount, validVectors.size());
+            }
+            
+            // 添加到内存列表
+            for (int i = 0; i < validVectors.size(); i++) {
+                allVectors.add(validVectors.get(i));
                 int nodeId = allVectors.size() - 1;
-                nodeIdToDocIdMap.put(nodeId, docIds.get(i));
+                nodeIdToDocIdMap.put(nodeId, validDocIds.get(i));
             }
             
             // 批量持久化到数据库
-            persistVectorsBatch(docIds, vectors);
+            persistVectorsBatch(validDocIds, validVectors);
             
             // ⚠️ 注意：这里不调用 buildIndex()
             // 由调用方在添加完所有向量后手动调用 rebuildIndex()
             
-            log.info("Added {} vectors to memory (index not rebuilt yet)", vectors.size());
+            log.info("Added {} vectors to memory (index not rebuilt yet)", validVectors.size());
             
         } catch (Exception e) {
             log.error("Failed to add vectors batch", e);
@@ -275,16 +301,37 @@ public class JVectorService {
             return;
         }
         
+        if (docIds.size() != vectors.size()) {
+            throw new IllegalArgumentException("docIds and vectors must have the same size");
+        }
+        
         try {
             String sql = "INSERT INTO vectors (doc_id, vector_data, dimension) VALUES (?, ?, ?)";
             
+            int successCount = 0;
+            int skipCount = 0;
+            
             // 简化实现：在事务中逐条插入（H2会自动优化）
             for (int i = 0; i < docIds.size(); i++) {
-                byte[] vectorBytes = serializeVector(vectors.get(i));
-                jdbcTemplate.update(sql, docIds.get(i), vectorBytes, vectors.get(i).length);
+                float[] vector = vectors.get(i);
+                
+                // 跳过null向量
+                if (vector == null) {
+                    log.warn("Skipping null vector at index {} for docId {}", i, docIds.get(i));
+                    skipCount++;
+                    continue;
+                }
+                
+                byte[] vectorBytes = serializeVector(vector);
+                jdbcTemplate.update(sql, docIds.get(i), vectorBytes, vector.length);
+                successCount++;
             }
             
-            log.debug("Batch persisted {} vectors", docIds.size());
+            if (skipCount > 0) {
+                log.warn("Batch persisted {} vectors, skipped {} null vectors", successCount, skipCount);
+            } else {
+                log.debug("Batch persisted {} vectors", successCount);
+            }
         } catch (Exception e) {
             log.error("Failed to batch persist vectors", e);
             throw new RuntimeException("Batch vector persistence failed", e);
@@ -555,6 +602,10 @@ public class JVectorService {
      * 序列化向量为字节数组
      */
     private byte[] serializeVector(float[] vector) throws IOException {
+        if (vector == null) {
+            throw new IllegalArgumentException("Vector cannot be null");
+        }
+        
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
         

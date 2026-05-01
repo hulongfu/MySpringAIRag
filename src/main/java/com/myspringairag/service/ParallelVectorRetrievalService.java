@@ -43,20 +43,17 @@ public class ParallelVectorRetrievalService {
     
     /**
      * 混合检索：2个向量变体 + 关键词检索并行执行
-     * @param userQuery 用户原始问题
+     * @param variant1 用户原始问题
+     * @param variant2 用户原始问题重写后的查询变体
      * @param topK 返回的最大结果数
      * @return 带分数的文档列表（已按最终分数排序）
      */
-    public List<ScoredDocument> parallelSearch(String userQuery, int topK) {
+    public List<ScoredDocument> parallelSearch(String variant1, String variant2, int topK) {
         long startTime = System.currentTimeMillis();
-        
-        // 1. 生成2个查询变体
-        String variant1 = userQuery;  // 原始查询
-        String variant2 = queryRewriteService.rewrite(userQuery);  // 重写查询
         
         log.info("Using 2 query variants: [original] '{}', [rewritten] '{}'", variant1, variant2);
         
-        // 2. 并行执行3个检索任务：2个向量检索 + 1个关键词检索
+        // 1. 并行执行3个检索任务：2个向量检索 + 1个关键词检索
         CompletableFuture<Map<Long, Float>> future1 = CompletableFuture.supplyAsync(() -> {
             try {
                 float[] vector = embeddingService.embed(variant1);
@@ -80,7 +77,7 @@ public class ParallelVectorRetrievalService {
         CompletableFuture<Map<Long, Float>> future3 = CompletableFuture.supplyAsync(() -> {
             try {
                 // 关键词检索，返回Top-200候选
-                List<Long> docIds = documentRepository.keywordSearch(userQuery, topK * 2);
+                List<Long> docIds = documentRepository.keywordSearch(variant2, topK * 2);
                 // 转换为Map<docId, score>，关键词检索给固定分数1.0
                 Map<Long, Float> keywordResults = new HashMap<>();
                 for (Long docId : docIds) {
@@ -94,16 +91,16 @@ public class ParallelVectorRetrievalService {
             }
         }, executor);
         
-        // 3. 等待所有任务完成
+        // 2. 等待所有任务完成
         CompletableFuture.allOf(future1, future2, future3).join();
         
-        // 4. 收集所有结果（使用join()代替get()，避免InterruptedException）
+        // 3. 收集所有结果（使用join()代替get()，避免InterruptedException）
         Map<Long, Float> results1 = future1.join();
         Map<Long, Float> results2 = future2.join();
         Map<Long, Float> results3 = future3.join();
         List<Map<Long, Float>> allResults = Arrays.asList(results1, results2, results3);
         
-        // 5. RRF融合（topK=0表示不限制返回数量，返回所有候选）
+        // 4. RRF融合（topK=0表示不限制返回数量，返回所有候选）
         List<ScoredDocument> merged = mergeScoresWithRRF(allResults, 0);
         
         log.info("Hybrid search completed in {}ms, merged to {} documents", 

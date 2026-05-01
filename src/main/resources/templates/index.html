@@ -515,10 +515,23 @@
             input.value = '';
 
             // 显示加载中
-            const loadingId = addMessage('正在思考...', 'assistant', true);
+            const loadingId = addMessage('', 'assistant', true);
+            removeMessage(loadingId);
+            
+            // 创建答案容器
+            const answerMessageId = 'answer-' + Date.now();
+            const answerDiv = document.createElement('div');
+            answerDiv.className = 'message assistant';
+            answerDiv.id = answerMessageId;
+            answerDiv.textContent = '';
+            document.getElementById('messages').appendChild(answerDiv);
 
             try {
-                const response = await fetch('/api/ask', {
+                // 使用EventSource接收SSE流（更简单可靠）
+                // 注意：EventSource默认只支持GET，所以我们需要用fetch POST获取sessionId，然后用GET连接SSE
+                // 但为了简化，我们这里继续使用fetch + ReadableStream方式
+                
+                const response = await fetch('/api/ask/stream', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -526,19 +539,66 @@
                     body: JSON.stringify({ question: question })
                 });
 
-                const result = await response.json();
-
-                // 移除加载消息
-                removeMessage(loadingId);
-
-                if (result.success) {
-                    addMessage(result.answer, 'assistant');
-                } else {
-                    addMessage(result.message || '回答失败', 'assistant');
+                if (!response.ok) {
+                    throw new Error('HTTP error! status: ' + response.status);
                 }
+
+                // 获取SSE流
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let isFirstToken = true;
+
+                // 读取流
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    
+                    // 保留最后一个不完整的行
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        const trimmedLine = line.trim();
+                        if (trimmedLine.startsWith('data:')) {
+                            const dataStr = trimmedLine.substring(5).trim();
+                            if (!dataStr) continue;
+                            
+                            try {
+                                const data = JSON.parse(dataStr);
+                                
+                                if (data.token !== undefined) {
+                                    // 接收到token，追加到答案
+                                    if (isFirstToken) {
+                                        answerDiv.textContent = data.token;
+                                        isFirstToken = false;
+                                    } else {
+                                        answerDiv.textContent += data.token;
+                                    }
+                                    // 滚动到底部
+                                    const messagesContainer = document.getElementById('messages');
+                                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                                } else if (data.answer !== undefined) {
+                                    // 完成事件
+                                    console.log('Answer complete');
+                                } else if (data.message !== undefined) {
+                                    // 错误或开始消息
+                                    if (answerDiv.textContent === '') {
+                                        answerDiv.textContent = data.message;
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse SSE data:', e, 'Data:', dataStr);
+                            }
+                        }
+                    }
+                }
+
             } catch (error) {
-                removeMessage(loadingId);
-                addMessage('请求失败: ' + error.message, 'assistant');
+                answerDiv.textContent = '请求失败: ' + error.message;
+                console.error('Stream error:', error);
             }
         }
 

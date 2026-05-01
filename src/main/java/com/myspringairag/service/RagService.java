@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -206,10 +207,18 @@ public class RagService {
         // 3. 批量生成向量并收集docIds（优化：先保存文档，再批量生成向量）
         List<Long> docIds = new ArrayList<>();
         List<String> chunksToEmbed = new ArrayList<>();
+        int emptyChunkCount = 0;
         
-        // 第1步：保存所有文档到数据库
+        // 第1步：保存所有文档到数据库（过滤空文本）
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
+            
+            // 过滤空文本或纯空白文本
+            if (chunk == null || chunk.trim().isEmpty()) {
+                log.warn("Skipping empty chunk at index {} for file {}", i, filename);
+                emptyChunkCount++;
+                continue;
+            }
             
             // 创建文档记录
             Document doc = new Document();
@@ -229,6 +238,14 @@ public class RagService {
             chunksToEmbed.add(chunk);
             
             log.debug("Saved chunk {}/{} for {}", i + 1, chunks.size(), filename);
+        }
+        
+        if (emptyChunkCount > 0) {
+            log.warn("Filtered out {} empty chunks from file {}", emptyChunkCount, filename);
+        }
+        
+        if (chunksToEmbed.isEmpty()) {
+            throw new IllegalArgumentException("No valid chunks to embed after filtering empty texts");
         }
         
         // 65% - 文档保存完成
@@ -284,7 +301,7 @@ public class RagService {
             // 如果启用并行检索，使用多查询变体
             if (useParallelRetrieval && parallelRetrievalService != null) {
                 log.info("Using parallel multi-query retrieval");
-                scoredDocs = parallelRetrievalService.parallelSearch(rewrittenQuery, searchTopK);
+                scoredDocs = parallelRetrievalService.parallelSearch(question, rewrittenQuery, searchTopK);
                 
                 // 打印每个文档的相似度分数
                 log.info("=== Vector Search Results with Scores ===");
@@ -486,6 +503,192 @@ public class RagService {
             throw new RuntimeException("Question answering failed: " + e.getMessage(), e);
         }
     }
+    
+    /**
+     * 流式问答（SSE）
+     */
+    public void answerQuestionStream(String question, org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter) {
+        try {
+            log.info("Answering question (stream): {}", question);
+            
+            // 发送开始事件
+            emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                .name("start")
+                .data(Map.of("message", "开始生成答案...")));
+            
+            // 0. 查询重写
+            String rewrittenQuery = queryRewriteService.rewrite(question);
+            
+            // 1. 向量检索（复用原有逻辑）
+            int searchTopK = useReranking ? rerankTopK : topK;
+            List<Long> vectorResults;
+            List<com.myspringairag.model.ScoredDocument> scoredDocs = null;
+            
+            if (useParallelRetrieval && parallelRetrievalService != null) {
+                scoredDocs = parallelRetrievalService.parallelSearch(question, rewrittenQuery, searchTopK);
+                vectorResults = scoredDocs.stream()
+                    .map(com.myspringairag.model.ScoredDocument::getId)
+                    .collect(Collectors.toList());
+            } else {
+                float[] queryVector = embeddingService.embed(rewrittenQuery);
+                Map<Long, Float> docScores = jVectorService.searchWithScores(queryVector, searchTopK);
+                scoredDocs = docScores.entrySet().stream()
+                    .map(entry -> new com.myspringairag.model.ScoredDocument(
+                        entry.getKey(), null, entry.getValue(), entry.getValue(), entry.getValue()))
+                    .collect(Collectors.toList());
+                vectorResults = scoredDocs.stream()
+                    .map(com.myspringairag.model.ScoredDocument::getId)
+                    .collect(Collectors.toList());
+            }
+            
+            if (vectorResults.isEmpty()) {
+                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                    .name("complete")
+                    .data(Map.of("answer", "抱歉，我在知识库中没有找到相关的信息来回答您的问题。")));
+                emitter.complete();
+                return;
+            }
+            
+            // 提取核心关键词
+            List<String> coreKeywords = tokenizationService.extractCoreKeywords(rewrittenQuery);
+            List<Document> finalDocs;
+            
+            // 2. 重排序或直接使用检索结果
+            if (useReranking && reranker != null) {
+                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
+                if (scoredDocs != null) {
+                    copyScoresToDocuments(candidateDocs, scoredDocs);
+                }
+                if (!coreKeywords.isEmpty()) {
+                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
+                    candidateDocs = candidateDocs.stream()
+                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
+                        .collect(Collectors.toList());
+                }
+                String[] passages = candidateDocs.stream()
+                    .map(doc -> doc.getParentContent() != null ? doc.getParentContent() : doc.getContent())
+                    .toArray(String[]::new);
+                Map<String, Float> rankedScores = reranker.rerankBatch(question, passages);
+                List<Document> finalCandidateDocs = candidateDocs;
+                finalDocs = rankedScores.entrySet().stream()
+                    .limit(topK)
+                    .map(entry -> findDocByContent(finalCandidateDocs, entry.getKey()))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            } else {
+                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
+                if (scoredDocs != null) {
+                    copyScoresToDocuments(candidateDocs, scoredDocs);
+                }
+                if (!coreKeywords.isEmpty()) {
+                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
+                    candidateDocs = candidateDocs.stream()
+                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
+                        .collect(Collectors.toList());
+                }
+                candidateDocs.sort((a, b) -> Double.compare(
+                    b.getSimilarityScore() != null ? b.getSimilarityScore() : 0,
+                    a.getSimilarityScore() != null ? a.getSimilarityScore() : 0
+                ));
+                finalDocs = candidateDocs.stream().limit(topK).collect(Collectors.toList());
+            }
+            
+            if (finalDocs.isEmpty()) {
+                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                    .name("complete")
+                    .data(Map.of("answer", "抱歉，我在知识库中没有找到相关的信息来回答您的问题。")));
+                emitter.complete();
+                return;
+            }
+
+            // 打印最终用于生成答案的文档及其分数
+            log.info("=== Final Documents for Answer Generation ===");
+            for (int i = 0; i < finalDocs.size(); i++) {
+                Document doc = finalDocs.get(i);
+                String contentPreview = doc.getParentContent() != null ?
+                        doc.getParentContent() : doc.getContent();
+                log.info("Doc {}: id={}, filename={}, chunk={}/{}, preview={}, similarityScore={}",
+                        i+1, doc.getId(), doc.getFilename(),
+                        doc.getChunkIndex()+1, doc.getTotalChunks(),
+                        contentPreview.substring(0, Math.min(150, contentPreview.length())), doc.getSimilarityScore());
+            }
+            log.info("================================================");
+            
+            // 3. 构建上下文
+            String context = buildContext(finalDocs);
+            
+            // 4. 流式调用LLM
+            StringBuilder fullAnswer = new StringBuilder();
+            
+            chatClient.prompt()
+                .system("""
+                    你是一个智能助手，必须严格基于提供的参考资料回答用户问题。
+                        
+                    重要规则：
+                    1. 只能使用参考资料中的信息，不得编造或添加资料中没有的内容
+                    2. 如果参考资料中没有相关信息，明确告知用户“知识库中没有找到相关信息”
+                    3. 回答时要引用参考资料的具体内容，保持准确性
+                    4. 不要使用你自己的训练知识，只使用提供的参考资料
+                    """)
+                .user("""
+                    问题：%s
+                        
+                    参考资料：
+                    %s
+                        
+                    请基于以上参考资料回答问题：
+                    """.formatted(question, context))
+                .stream()
+                .content()
+                .doOnNext(chunk -> {
+                    if (chunk != null && !chunk.isEmpty()) {
+                        fullAnswer.append(chunk);
+                        try {
+                            emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                                .name("token")
+                                .data(Map.of("token", chunk)));
+                        } catch (IOException e) {
+                            log.error("Failed to send token", e);
+                        }
+                    }
+                })
+                .doOnError(error -> {
+                    log.error("Stream error", error);
+                    try {
+                        emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                            .name("error")
+                            .data(Map.of("message", "生成答案时出错: " + error.getMessage())));
+                    } catch (IOException e) {
+                        log.error("Failed to send error event", e);
+                    }
+                    emitter.completeWithError(error);
+                })
+                .doOnComplete(() -> {
+                    try {
+                        emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                            .name("complete")
+                            .data(Map.of("answer", fullAnswer.toString())));
+                        emitter.complete();
+                        log.info("Stream answer completed");
+                    } catch (IOException e) {
+                        log.error("Failed to send complete event", e);
+                        emitter.completeWithError(e);
+                    }
+                })
+                .subscribe();
+            
+        } catch (Exception e) {
+            log.error("Failed to answer question (stream)", e);
+            try {
+                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                    .name("error")
+                    .data(Map.of("message", "回答失败: " + e.getMessage())));
+            } catch (IOException ioException) {
+                log.error("Failed to send error event", ioException);
+            }
+            emitter.completeWithError(e);
+        }
+    }
         
     /**
      * 根据内容查找文档
@@ -585,7 +788,7 @@ public class RagService {
             
             // 计算新分数：originalScore * (matchedCount / totalKeywords)
             double newScore = originalScore * ((double) matchedCount / totalKeywords);
-            log.info("Adjusted score for doc {}: {}， originalScore: {}", doc.getId(), newScore, originalScore);
+            log.debug("Adjusted score for doc {}: {}， originalScore: {}", doc.getId(), newScore, originalScore);
             doc.setSimilarityScore(newScore);
         }
         

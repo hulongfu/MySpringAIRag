@@ -13,6 +13,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.io.IOException;
 
 @Slf4j
 @RestController
@@ -84,7 +86,7 @@ public class RagController {
     }
     
     /**
-     * 问答接口
+     * 问答接口（同步）
      */
     @PostMapping("/ask")
     public ResponseEntity<Map<String, Object>> askQuestion(@RequestBody QuestionRequest request) {
@@ -110,6 +112,49 @@ public class RagController {
             response.put("message", "回答失败: " + e.getMessage());
             return ResponseEntity.internalServerError().body(response);
         }
+    }
+    
+    /**
+     * 流式问答接口（SSE）
+     */
+    @PostMapping(value = "/ask/stream", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter askQuestionStream(@RequestBody QuestionRequest request) {
+        // 创建SSE emitter，设置超时时间为0（不超时）
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter = 
+            new org.springframework.web.servlet.mvc.method.annotation.SseEmitter(0L);
+        
+        try {
+            if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
+                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                    .name("error")
+                    .data(Map.of("message", "问题不能为空")));
+                emitter.complete();
+                return emitter;
+            }
+            
+            // 异步执行流式回答
+            CompletableFuture.runAsync(() -> {
+                try {
+                    ragService.answerQuestionStream(request.getQuestion(), emitter);
+                } catch (Exception e) {
+                    log.error("Stream question answering failed", e);
+                    try {
+                        emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                            .name("error")
+                            .data(Map.of("message", "回答失败: " + e.getMessage())));
+                    } catch (IOException ioException) {
+                        log.error("Failed to send error event", ioException);
+                    }
+                    emitter.completeWithError(e);
+                }
+            });
+            
+        } catch (Exception e) {
+            log.error("Failed to create stream emitter", e);
+            emitter.completeWithError(e);
+        }
+        
+        return emitter;
     }
     
     /**

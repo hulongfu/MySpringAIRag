@@ -58,7 +58,7 @@ public class QueryRewriteService {
             String result = query
                 .replaceAll("(如何|怎么样|怎么|怎样)", "")
                 .trim();
-            
+
             return result;
         }
         
@@ -70,8 +70,17 @@ public class QueryRewriteService {
 
             return result;
         }
-        
-        // 模式3: 直接返回清理后的查询
+
+        // 模式3: "XXX有哪些" / "XXX是哪些" → 提取核心内容
+        if (query.contains("有哪些") || query.contains("是哪些")) {
+            String result = query
+                    .replaceAll("(都有哪些规则|都有哪些特点|都有哪些特征|都有哪些|都是哪些|有哪些规则|有哪些特点|有哪些特征|有哪些|是哪些)[？?]?$", "")
+                    .trim();
+
+            return result;
+        }
+
+        // 模式4: 直接返回清理后的查询
         return query;
     }
 }
