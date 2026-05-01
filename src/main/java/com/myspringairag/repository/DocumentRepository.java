@@ -10,7 +10,6 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -128,7 +127,7 @@ public class DocumentRepository {
     public List<Long> keywordSearch(String query, int limit) {
         // 使用IK分词器提取关键词
         String[] keywords = tokenizationService.tokenize(query);
-        
+
         if (keywords.length == 0) {
             return List.of();
         }
@@ -155,6 +154,11 @@ public class DocumentRepository {
         
         try {
             List<Long> results = jdbcTemplate.queryForList(sqlBuilder.toString(), Long.class, params);
+            log.info("Keyword search for '{}' returned {} results", query, results.size());
+//            List<Document> candidateDocs = this.findByIds(results);
+//            for (Document doc : candidateDocs) {
+//                log.warn("doc-id: {}, doc-content: {} ", doc.getId(), doc.getContent());
+//            }
             return results;
         } catch (Exception e) {
             log.error("Keyword search failed: {}", e.getMessage());

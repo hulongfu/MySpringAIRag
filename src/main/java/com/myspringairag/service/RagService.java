@@ -340,7 +340,7 @@ public class RagService {
             if (useReranking && reranker != null) {
                 log.info("Using reranker to refine {} candidates", vectorResults.size());
                             
-                // 获取候选文档内容
+                // 【修改】获取所有候选文档内容（不限制数量）
                 List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
                 
                 // 如果是并行检索，从 ScoredDocument 复制分数
@@ -351,6 +351,15 @@ public class RagService {
                 // 根据关键词调整分数并排序
                 if (!coreKeywords.isEmpty()) {
                     candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
+                    
+                    if (candidateDocs.isEmpty()) {
+                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
+                    }
+                    
+                    // 【新增】过滤掉分数为0的文档
+                    candidateDocs = candidateDocs.stream()
+                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
+                        .collect(Collectors.toList());
                     
                     if (candidateDocs.isEmpty()) {
                         return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
@@ -389,7 +398,8 @@ public class RagService {
                 log.info("After reranking: {} documents selected", finalDocs.size());
             } else {
                 // 不使用重排序，直接使用向量检索结果
-                List<Document> candidateDocs = documentRepository.findByIds(vectorResults.subList(0, Math.min(topK, vectorResults.size())));
+                // 【修改】获取所有RRF融合的候选文档（不限制数量）
+                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
                 
                 // 从 ScoredDocument 复制分数
                 if (scoredDocs != null) {
@@ -403,9 +413,25 @@ public class RagService {
                     if (candidateDocs.isEmpty()) {
                         return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
                     }
+                    
+                    // 【新增】过滤掉分数为0的文档（完全不匹配关键词的文档）
+                    candidateDocs = candidateDocs.stream()
+                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
+                        .collect(Collectors.toList());
+                    
+                    if (candidateDocs.isEmpty()) {
+                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
+                    }
                 }
                 
-                finalDocs = candidateDocs;
+                // 【新增】按分数排序并截取Top-K
+                candidateDocs.sort((a, b) -> Double.compare(
+                    b.getSimilarityScore() != null ? b.getSimilarityScore() : 0,
+                    a.getSimilarityScore() != null ? a.getSimilarityScore() : 0
+                ));
+                finalDocs = candidateDocs.stream()
+                    .limit(topK)
+                    .collect(Collectors.toList());
             }
                 
             if (finalDocs.isEmpty()) {

@@ -10,6 +10,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * 并行向量检索服务 - 支持多查询变体并行检索 + RRF融合
@@ -30,6 +31,9 @@ public class ParallelVectorRetrievalService {
     @Autowired
     private com.myspringairag.service.QueryTokenizationService tokenizationService;
     
+    @Autowired
+    private com.myspringairag.repository.DocumentRepository documentRepository;
+    
     // 注入统一的并行计算线程池
     private final ExecutorService executor;
     
@@ -38,7 +42,7 @@ public class ParallelVectorRetrievalService {
     }
     
     /**
-     * 多查询变体并行检索
+     * 混合检索：2个向量变体 + 关键词检索并行执行
      * @param userQuery 用户原始问题
      * @param topK 返回的最大结果数
      * @return 带分数的文档列表（已按最终分数排序）
@@ -46,38 +50,63 @@ public class ParallelVectorRetrievalService {
     public List<ScoredDocument> parallelSearch(String userQuery, int topK) {
         long startTime = System.currentTimeMillis();
         
-        // 1. 生成查询变体
-        List<String> variants = generateVariants(userQuery);
-        log.info("Generated {} query variants: {}", variants.size(), variants);
+        // 1. 生成2个查询变体
+        String variant1 = userQuery;  // 原始查询
+        String variant2 = queryRewriteService.rewrite(userQuery);  // 重写查询
         
-        // 2. 并行执行每个变体的检索
-        List<CompletableFuture<Map<Long, Float>>> futures = variants.stream()
-            .map(variant -> CompletableFuture.supplyAsync(() -> {
-                try {
-                    // 生成embedding
-                    float[] vector = embeddingService.embed(variant);
-                    // 向量检索，返回带分数的结果
-                    return jVectorService.searchWithScores(vector, topK);
-                } catch (Exception e) {
-                    log.error("Search failed for variant: {}", variant, e);
-                    return Collections.<Long, Float>emptyMap();
+        log.info("Using 2 query variants: [original] '{}', [rewritten] '{}'", variant1, variant2);
+        
+        // 2. 并行执行3个检索任务：2个向量检索 + 1个关键词检索
+        CompletableFuture<Map<Long, Float>> future1 = CompletableFuture.supplyAsync(() -> {
+            try {
+                float[] vector = embeddingService.embed(variant1);
+                return jVectorService.searchWithScores(vector, topK);
+            } catch (Exception e) {
+                log.error("Vector search failed for variant1: {}", variant1, e);
+                return Collections.<Long, Float>emptyMap();
+            }
+        }, executor);
+        
+        CompletableFuture<Map<Long, Float>> future2 = CompletableFuture.supplyAsync(() -> {
+            try {
+                float[] vector = embeddingService.embed(variant2);
+                return jVectorService.searchWithScores(vector, topK);
+            } catch (Exception e) {
+                log.error("Vector search failed for variant2: {}", variant2, e);
+                return Collections.<Long, Float>emptyMap();
+            }
+        }, executor);
+        
+        CompletableFuture<Map<Long, Float>> future3 = CompletableFuture.supplyAsync(() -> {
+            try {
+                // 关键词检索，返回Top-200候选
+                List<Long> docIds = documentRepository.keywordSearch(userQuery, topK * 2);
+                // 转换为Map<docId, score>，关键词检索给固定分数1.0
+                Map<Long, Float> keywordResults = new HashMap<>();
+                for (Long docId : docIds) {
+                    keywordResults.put(docId, 1.0f);
                 }
-            }, executor))
-            .collect(Collectors.toList());
+                log.debug("Keyword search returned {} results", docIds.size());
+                return keywordResults;
+            } catch (Exception e) {
+                log.error("Keyword search failed: {}", e.getMessage(), e);
+                return Collections.<Long, Float>emptyMap();
+            }
+        }, executor);
         
         // 3. 等待所有任务完成
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        CompletableFuture.allOf(future1, future2, future3).join();
         
-        // 4. 收集所有结果
-        List<Map<Long, Float>> allResults = futures.stream()
-            .map(CompletableFuture::join)
-            .filter(result -> !result.isEmpty())
-            .collect(Collectors.toList());
+        // 4. 收集所有结果（使用join()代替get()，避免InterruptedException）
+        Map<Long, Float> results1 = future1.join();
+        Map<Long, Float> results2 = future2.join();
+        Map<Long, Float> results3 = future3.join();
+        List<Map<Long, Float>> allResults = Arrays.asList(results1, results2, results3);
         
-        // 5. RRF融合
-        List<ScoredDocument> merged = mergeScoresWithRRF(allResults, topK);
+        // 5. RRF融合（topK=0表示不限制返回数量，返回所有候选）
+        List<ScoredDocument> merged = mergeScoresWithRRF(allResults, 0);
         
-        log.info("Parallel search completed in {}ms, merged to {} documents", 
+        log.info("Hybrid search completed in {}ms, merged to {} documents", 
             System.currentTimeMillis() - startTime, merged.size());
         
         return merged;
@@ -328,6 +357,8 @@ public class ParallelVectorRetrievalService {
     
     /**
      * RRF融合多个查询变体的结果
+     * @param allResults 所有查询变体的检索结果
+     * @param topK 返回的最大结果数（0表示不限制）
      */
     private List<ScoredDocument> mergeScoresWithRRF(List<Map<Long, Float>> allResults, int topK) {
         Map<Long, Double> rrfScores = new HashMap<>();
@@ -362,18 +393,23 @@ public class ParallelVectorRetrievalService {
         }
         
         // 计算最终分数 = 原始分数 * (1 + RRF分数 * 10)
-        List<ScoredDocument> scoredDocs = allDocIds.stream()
+        Stream<ScoredDocument> scoredDocsStream = allDocIds.stream()
             .map(docId -> {
                 float originalScore = maxOriginalScores.get(docId);
                 double rrfScore = rrfScores.getOrDefault(docId, 0.0);
                 double finalScore = originalScore * (1 + rrfScore * 10);
-                
                 return new ScoredDocument(docId, null, originalScore, rrfScore, finalScore);
             })
-            .sorted(Comparator.comparingDouble(ScoredDocument::getFinalScore).reversed())
-            .limit(topK)
-            .collect(Collectors.toList());
+            .sorted(Comparator.comparingDouble(ScoredDocument::getFinalScore).reversed());
         
-        return scoredDocs;
+        // 如果topK > 0，则限制返回数量；否则返回所有候选
+        List<ScoredDocument> result;
+        if (topK > 0) {
+            result = scoredDocsStream.limit(topK).collect(Collectors.toList());
+        } else {
+            result = scoredDocsStream.collect(Collectors.toList());
+        }
+        
+        return result;
     }
 }
