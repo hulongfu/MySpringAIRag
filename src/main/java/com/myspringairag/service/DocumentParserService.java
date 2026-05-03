@@ -55,11 +55,25 @@ public class DocumentParserService {
     private final Tika tika = new Tika();
     
     public String parseFile(MultipartFile file) throws IOException, TikaException, SAXException {
+        // 安全检查：文件名不能为空
+        String originalFilename = file.getOriginalFilename();
+        if (originalFilename == null || originalFilename.trim().isEmpty()) {
+            throw new IllegalArgumentException("Filename cannot be empty");
+        }
+        
         // 保存文件
         Path uploadPath = Paths.get(uploadDir);
         Files.createDirectories(uploadPath);
         
-        Path filePath = uploadPath.resolve(file.getOriginalFilename());
+        // 安全处理：只保留文件名，去除路径信息（防止路径遍历攻击）
+        String safeFilename = Paths.get(originalFilename).getFileName().toString();
+        Path filePath = uploadPath.resolve(safeFilename);
+        
+        // 额外检查：确保最终路径在 uploads 目录内
+        if (!filePath.normalize().startsWith(uploadPath.normalize())) {
+            throw new IllegalArgumentException("Invalid filename: " + originalFilename);
+        }
+        
         Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
         
         // 解析文件内容

@@ -31,7 +31,22 @@ public class RagService {
     private final SseController sseController;
     private final com.myspringairag.service.QueryTokenizationService tokenizationService;
     
-    // 使用 ThreadLocal 存储当前任务的 taskId
+    /**
+     * 存储当前任务的 taskId
+     * 
+     * 重要说明：
+     * - 此 ThreadLocal 仅在 documentProcessingExecutor 单线程中使用
+     * - 不应用于并行计算线程（parallelComputeExecutor）
+     * - 如果需要跨线程传递 taskId，请显式传递参数而非依赖 ThreadLocal
+     * - 原因：InheritableThreadLocal 在线程池复用场景下会导致数据污染
+     * 
+     * 使用场景：
+     * 1. AsyncUploadService.processDocument() 设置 taskId
+     * 2. RagService.uploadDocumentFromPath() 读取 taskId 用于进度推送
+     * 3. RagService.processAndIndex() 读取 taskId 用于进度推送
+     * 
+     * @see AsyncUploadService#processDocument(String, Path, String)
+     */
     private static final ThreadLocal<String> currentTaskId = new ThreadLocal<>();
     
     @Autowired(required = false)
