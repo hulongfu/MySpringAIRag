@@ -296,223 +296,70 @@ public class RagService {
     }
     
     /**
+     * 检索结果封装类
+     */
+    private static class RetrievalResult {
+        List<Long> vectorResults;
+        List<com.myspringairag.model.ScoredDocument> scoredDocs;
+        List<Document> finalDocs;
+            
+        RetrievalResult(List<Long> vectorResults, 
+                       List<com.myspringairag.model.ScoredDocument> scoredDocs,
+                       List<Document> finalDocs) {
+            this.vectorResults = vectorResults;
+            this.scoredDocs = scoredDocs;
+            this.finalDocs = finalDocs;
+        }
+    }
+        
+    /**
      * 基于知识库回答问题（查询转换 + 向量检索 + BGE重排序）
      */
     public String answerQuestion(String question) {
-        long startTime = System.currentTimeMillis();
         try {
             log.info("Answering question: {}", question);
-            
-            // 0. 查询重写（优化为更适合向量检索的格式）
-            String rewrittenQuery = queryRewriteService.rewrite(question);
                 
-            // 1. 向量检索
-            long vectorSearchStart = System.currentTimeMillis();
-            int searchTopK = useReranking ? rerankTopK : topK;
-            
-            List<Long> vectorResults;
-            List<com.myspringairag.model.ScoredDocument> scoredDocs = null;  // 保存以便后续使用
-            
-            // 如果启用并行检索，使用多查询变体
-            if (useParallelRetrieval && parallelRetrievalService != null) {
-                log.info("Using parallel multi-query retrieval");
-                scoredDocs = parallelRetrievalService.parallelSearch(question, rewrittenQuery, searchTopK);
+            // 执行检索和文档处理
+            RetrievalResult result = retrieveAndProcessDocuments(question);
                 
-                // 打印每个文档的相似度分数
-                log.info("=== Vector Search Results with Scores ===");
-                for (int i = 0; i < scoredDocs.size(); i++) {
-                    com.myspringairag.model.ScoredDocument sd = scoredDocs.get(i);
-                    log.info("Rank {}: docId={}, originalScore={}, rrfScore={}, finalScore={}",
-                        i+1, sd.getId(), sd.getOriginalScore(), sd.getRrfScore(), sd.getFinalScore());
-                }
-                log.info("===========================================");
-                
-                // 提取docId列表
-                vectorResults = scoredDocs.stream()
-                    .map(com.myspringairag.model.ScoredDocument::getId)
-                    .collect(Collectors.toList());
-                
-                log.info("Parallel retrieval returned {} results (took: {}ms)", 
-                    vectorResults.size(), System.currentTimeMillis() - vectorSearchStart);
-            } else {
-                // 传统单查询检索
-                
-                float[] queryVector = embeddingService.embed(rewrittenQuery);
-                
-                // 使用带分数的搜索
-                Map<Long, Float> docScores = jVectorService.searchWithScores(queryVector, searchTopK);
-                
-                // 转换为 ScoredDocument 列表（保持统一格式）
-                scoredDocs = docScores.entrySet().stream()
-                    .map(entry -> new com.myspringairag.model.ScoredDocument(
-                        entry.getKey(),
-                        null,  // content 不需要
-                        entry.getValue(),  // originalScore
-                        entry.getValue(),  // rrfScore (单查询时等于originalScore)
-                        entry.getValue()   // finalScore
-                    ))
-                    .collect(Collectors.toList());
-                
-                // 提取docId列表
-                vectorResults = scoredDocs.stream()
-                    .map(com.myspringairag.model.ScoredDocument::getId)
-                    .collect(Collectors.toList());
-            }
-                
-            if (vectorResults.isEmpty()) {
+            // 检查是否有检索结果
+            if (result.finalDocs.isEmpty()) {
                 return "抱歉，我在知识库中没有找到相关的信息来回答您的问题。";
             }
-            
-            // 提取核心关键词
-            List<String> coreKeywords = tokenizationService.extractCoreKeywords(rewrittenQuery);
                 
-            List<Document> finalDocs;
-                
-            // 2. 如果启用重排序，使用 BgeReranker 精排
-            if (useReranking && reranker != null) {
-                log.info("Using reranker to refine {} candidates", vectorResults.size());
-                            
-                // 【修改】获取所有候选文档内容（不限制数量）
-                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
-                
-                // 如果是并行检索，从 ScoredDocument 复制分数
-                if (scoredDocs != null) {
-                    copyScoresToDocuments(candidateDocs, scoredDocs);
-                }
-                
-                // 根据关键词调整分数并排序
-                if (!coreKeywords.isEmpty()) {
-                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
-                    
-                    if (candidateDocs.isEmpty()) {
-                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
-                    }
-                    
-                    // 【新增】过滤掉分数为0的文档
-                    candidateDocs = candidateDocs.stream()
-                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
-                        .collect(Collectors.toList());
-                    
-                    if (candidateDocs.isEmpty()) {
-                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
-                    }
-                }
-                            
-                // 打印候选文档信息
-                log.info("=== Candidate Documents ===");
-                for (int i = 0; i < candidateDocs.size(); i++) {
-                    Document doc = candidateDocs.get(i);
-                    String contentPreview = doc.getParentContent() != null ? 
-                        doc.getParentContent() : doc.getContent();
-                    log.info("Candidate {}: id={}, filename={}, chunk={}/{}, content_preview={}, similarityScore={}",
-                        i+1, doc.getId(), doc.getFilename(), 
-                        doc.getChunkIndex()+1, doc.getTotalChunks(),
-                        contentPreview.substring(0, Math.min(100, contentPreview.length())), doc.getSimilarityScore());
-                }
-                log.info("===========================");
-                            
-                // 构建重排序输入（使用parentContent如果存在）
-                String[] passages = candidateDocs.stream()
-                    .map(doc -> doc.getParentContent() != null ? doc.getParentContent() : doc.getContent())
-                    .toArray(String[]::new);
-                            
-                // 执行重排序
-                Map<String, Float> rankedScores = reranker.rerankBatch(question, passages);
-                            
-                // 取 top-K
-                List<Document> finalCandidateDocs = candidateDocs;
-                finalDocs = rankedScores.entrySet().stream()
-                    .limit(topK)
-                    .map(entry -> findDocByContent(finalCandidateDocs, entry.getKey()))
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-                            
-                log.info("After reranking: {} documents selected", finalDocs.size());
-            } else {
-                // 不使用重排序，直接使用向量检索结果
-                // 【修改】获取所有RRF融合的候选文档（不限制数量）
-                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
-                
-                // 从 ScoredDocument 复制分数
-                if (scoredDocs != null) {
-                    copyScoresToDocuments(candidateDocs, scoredDocs);
-                }
-                
-                // 根据关键词调整分数并排序
-                if (!coreKeywords.isEmpty()) {
-                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
-                    
-                    if (candidateDocs.isEmpty()) {
-                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
-                    }
-                    
-                    // 【新增】过滤掉分数为0的文档（完全不匹配关键词的文档）
-                    candidateDocs = candidateDocs.stream()
-                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
-                        .collect(Collectors.toList());
-                    
-                    if (candidateDocs.isEmpty()) {
-                        return "抱歉，我在知识库中没有找到包含关键信息（" + String.join(", ", coreKeywords) + "）的内容。";
-                    }
-                }
-                
-                // 【新增】按分数排序并截取Top-K
-                candidateDocs.sort((a, b) -> Double.compare(
-                    b.getSimilarityScore() != null ? b.getSimilarityScore() : 0,
-                    a.getSimilarityScore() != null ? a.getSimilarityScore() : 0
-                ));
-                finalDocs = candidateDocs.stream()
-                    .limit(topK)
-                    .collect(Collectors.toList());
-            }
-                
-            if (finalDocs.isEmpty()) {
-                return "抱歉，我在知识库中没有找到相关的信息来回答您的问题。";
-            }
-            
             // 打印最终用于生成答案的文档及其分数
-            log.info("=== Final Documents for Answer Generation ===");
-            for (int i = 0; i < finalDocs.size(); i++) {
-                Document doc = finalDocs.get(i);
-                String contentPreview = doc.getParentContent() != null ? 
-                    doc.getParentContent() : doc.getContent();
-                log.info("Doc {}: id={}, filename={}, chunk={}/{}, preview={}, similarityScore={}",
-                    i+1, doc.getId(), doc.getFilename(), 
-                    doc.getChunkIndex()+1, doc.getTotalChunks(),
-                    contentPreview.substring(0, Math.min(150, contentPreview.length())), doc.getSimilarityScore());
-            }
-            log.info("================================================");
+            logFinalDocuments(result.finalDocs);
                 
-            // 5. 构建上下文
-            String context = buildContext(finalDocs);
-            
-            log.info("Retrieved {} documents for answer generation", finalDocs.size());
+            // 构建上下文
+            String context = buildContext(result.finalDocs);
                 
-            // 6. 调用LLM生成答案
+            log.info("Retrieved {} documents for answer generation", result.finalDocs.size());
+                    
+            // 调用LLM生成答案
             String answer = chatClient.prompt()
                 .system("""
                     你是一个智能助手，必须严格基于提供的参考资料回答用户问题。
-                        
+                            
                     重要规则：
                     1. 只能使用参考资料中的信息，不得编造或添加资料中没有的内容
-                    2. 如果参考资料中没有相关信息，明确告知用户“知识库中没有找到相关信息”
+                    2. 如果参考资料中没有相关信息，明确告知用户"知识库中没有找到相关信息"
                     3. 回答时要引用参考资料的具体内容，保持准确性
                     4. 不要使用你自己的训练知识，只使用提供的参考资料
                     """)
                 .user("""
                     问题：%s
-                        
+                            
                     参考资料：
                     %s
-                        
+                            
                     请基于以上参考资料回答问题：
                     """.formatted(question, context))
                 .call()
                 .content();
-            
+                
             log.info("Answer generated successfully");
             return answer;
-                
+                    
         } catch (Exception e) {
             log.error("Failed to answer question", e);
             throw new RuntimeException("Question answering failed: " + e.getMessage(), e);
@@ -525,132 +372,49 @@ public class RagService {
     public void answerQuestionStream(String question, org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter) {
         try {
             log.info("Answering question (stream): {}", question);
-            
+                
             // 发送开始事件
             emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
                 .name("start")
                 .data(Map.of("message", "开始生成答案...")));
-            
-            // 0. 查询重写
-            String rewrittenQuery = queryRewriteService.rewrite(question);
-            
-            // 1. 向量检索（复用原有逻辑）
-            int searchTopK = useReranking ? rerankTopK : topK;
-            List<Long> vectorResults;
-            List<com.myspringairag.model.ScoredDocument> scoredDocs = null;
-            
-            if (useParallelRetrieval && parallelRetrievalService != null) {
-                scoredDocs = parallelRetrievalService.parallelSearch(question, rewrittenQuery, searchTopK);
-                vectorResults = scoredDocs.stream()
-                    .map(com.myspringairag.model.ScoredDocument::getId)
-                    .collect(Collectors.toList());
-            } else {
-                float[] queryVector = embeddingService.embed(rewrittenQuery);
-                Map<Long, Float> docScores = jVectorService.searchWithScores(queryVector, searchTopK);
-                scoredDocs = docScores.entrySet().stream()
-                    .map(entry -> new com.myspringairag.model.ScoredDocument(
-                        entry.getKey(), null, entry.getValue(), entry.getValue(), entry.getValue()))
-                    .collect(Collectors.toList());
-                vectorResults = scoredDocs.stream()
-                    .map(com.myspringairag.model.ScoredDocument::getId)
-                    .collect(Collectors.toList());
-            }
-            
-            if (vectorResults.isEmpty()) {
+                
+            // 执行检索和文档处理
+            RetrievalResult result = retrieveAndProcessDocuments(question);
+                
+            // 检查是否有检索结果
+            if (result.finalDocs.isEmpty()) {
                 emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
                     .name("complete")
                     .data(Map.of("answer", "抱歉，我在知识库中没有找到相关的信息来回答您的问题。")));
                 emitter.complete();
                 return;
             }
-            
-            // 提取核心关键词
-            List<String> coreKeywords = tokenizationService.extractCoreKeywords(rewrittenQuery);
-            List<Document> finalDocs;
-            
-            // 2. 重排序或直接使用检索结果
-            if (useReranking && reranker != null) {
-                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
-                if (scoredDocs != null) {
-                    copyScoresToDocuments(candidateDocs, scoredDocs);
-                }
-                if (!coreKeywords.isEmpty()) {
-                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
-                    candidateDocs = candidateDocs.stream()
-                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
-                        .collect(Collectors.toList());
-                }
-                String[] passages = candidateDocs.stream()
-                    .map(doc -> doc.getParentContent() != null ? doc.getParentContent() : doc.getContent())
-                    .toArray(String[]::new);
-                Map<String, Float> rankedScores = reranker.rerankBatch(question, passages);
-                List<Document> finalCandidateDocs = candidateDocs;
-                finalDocs = rankedScores.entrySet().stream()
-                    .limit(topK)
-                    .map(entry -> findDocByContent(finalCandidateDocs, entry.getKey()))
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            } else {
-                List<Document> candidateDocs = documentRepository.findByIds(vectorResults);
-                if (scoredDocs != null) {
-                    copyScoresToDocuments(candidateDocs, scoredDocs);
-                }
-                if (!coreKeywords.isEmpty()) {
-                    candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
-                    candidateDocs = candidateDocs.stream()
-                        .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
-                        .collect(Collectors.toList());
-                }
-                candidateDocs.sort((a, b) -> Double.compare(
-                    b.getSimilarityScore() != null ? b.getSimilarityScore() : 0,
-                    a.getSimilarityScore() != null ? a.getSimilarityScore() : 0
-                ));
-                finalDocs = candidateDocs.stream().limit(topK).collect(Collectors.toList());
-            }
-            
-            if (finalDocs.isEmpty()) {
-                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
-                    .name("complete")
-                    .data(Map.of("answer", "抱歉，我在知识库中没有找到相关的信息来回答您的问题。")));
-                emitter.complete();
-                return;
-            }
-
+                
             // 打印最终用于生成答案的文档及其分数
-            log.info("=== Final Documents for Answer Generation ===");
-            for (int i = 0; i < finalDocs.size(); i++) {
-                Document doc = finalDocs.get(i);
-                String contentPreview = doc.getParentContent() != null ?
-                        doc.getParentContent() : doc.getContent();
-                log.info("Doc {}: id={}, filename={}, chunk={}/{}, preview={}, similarityScore={}",
-                        i+1, doc.getId(), doc.getFilename(),
-                        doc.getChunkIndex()+1, doc.getTotalChunks(),
-                        contentPreview.substring(0, Math.min(150, contentPreview.length())), doc.getSimilarityScore());
-            }
-            log.info("================================================");
-            
-            // 3. 构建上下文
-            String context = buildContext(finalDocs);
-            
-            // 4. 流式调用LLM
+            logFinalDocuments(result.finalDocs);
+                
+            // 构建上下文
+            String context = buildContext(result.finalDocs);
+                
+            // 流式调用LLM
             StringBuilder fullAnswer = new StringBuilder();
-            
+                
             chatClient.prompt()
                 .system("""
                     你是一个智能助手，必须严格基于提供的参考资料回答用户问题。
-                        
+                            
                     重要规则：
                     1. 只能使用参考资料中的信息，不得编造或添加资料中没有的内容
-                    2. 如果参考资料中没有相关信息，明确告知用户“知识库中没有找到相关信息”
+                    2. 如果参考资料中没有相关信息，明确告知用户"知识库中没有找到相关信息"
                     3. 回答时要引用参考资料的具体内容，保持准确性
                     4. 不要使用你自己的训练知识，只使用提供的参考资料
                     """)
                 .user("""
                     问题：%s
-                        
+                            
                     参考资料：
                     %s
-                        
+                            
                     请基于以上参考资料回答问题：
                     """.formatted(question, context))
                 .stream()
@@ -691,7 +455,7 @@ public class RagService {
                     }
                 })
                 .subscribe();
-            
+                
         } catch (Exception e) {
             log.error("Failed to answer question (stream)", e);
             try {
@@ -705,6 +469,238 @@ public class RagService {
         }
     }
         
+    /**
+     * 执行文档检索和处理（公共逻辑）
+     * @param question 用户问题
+     * @return 检索结果（包含向量结果、评分文档和最终文档列表）
+     */
+    private RetrievalResult retrieveAndProcessDocuments(String question) {
+        // 0. 查询重写
+        String rewrittenQuery = queryRewriteService.rewrite(question);
+        
+        // 1. 向量检索
+        VectorSearchResult searchResult = performVectorSearch(question, rewrittenQuery);
+        
+        // 如果没有检索结果，返回空结果
+        if (searchResult.vectorResults.isEmpty()) {
+            return new RetrievalResult(searchResult.vectorResults, searchResult.scoredDocs, List.of());
+        }
+        
+        // 2. 文档处理和重排序
+        List<Document> finalDocs = processAndRankDocuments(question, searchResult);
+        
+        return new RetrievalResult(searchResult.vectorResults, searchResult.scoredDocs, finalDocs);
+    }
+    
+    /**
+     * 向量搜索结果封装
+     */
+    private static class VectorSearchResult {
+        List<Long> vectorResults;
+        List<com.myspringairag.model.ScoredDocument> scoredDocs;
+        
+        VectorSearchResult(List<Long> vectorResults, List<com.myspringairag.model.ScoredDocument> scoredDocs) {
+            this.vectorResults = vectorResults;
+            this.scoredDocs = scoredDocs;
+        }
+    }
+    
+    /**
+     * 执行向量检索
+     */
+    private VectorSearchResult performVectorSearch(String question, String rewrittenQuery) {
+        long vectorSearchStart = System.currentTimeMillis();
+        int searchTopK = useReranking ? rerankTopK : topK;
+        
+        List<Long> vectorResults;
+        List<com.myspringairag.model.ScoredDocument> scoredDocs = null;
+        
+        if (useParallelRetrieval && parallelRetrievalService != null) {
+            // 并行多查询变体检索
+            scoredDocs = parallelRetrievalService.parallelSearch(question, rewrittenQuery, searchTopK);
+            logVectorSearchResults(scoredDocs);
+            
+            vectorResults = scoredDocs.stream()
+                .map(com.myspringairag.model.ScoredDocument::getId)
+                .collect(Collectors.toList());
+            
+            log.info("Parallel retrieval returned {} results (took: {}ms)", 
+                vectorResults.size(), System.currentTimeMillis() - vectorSearchStart);
+        } else {
+            // 传统单查询检索
+            float[] queryVector = embeddingService.embed(rewrittenQuery);
+            Map<Long, Float> docScores = jVectorService.searchWithScores(queryVector, searchTopK);
+            
+            scoredDocs = convertToScoredDocuments(docScores);
+            vectorResults = scoredDocs.stream()
+                .map(com.myspringairag.model.ScoredDocument::getId)
+                .collect(Collectors.toList());
+        }
+        
+        return new VectorSearchResult(vectorResults, scoredDocs);
+    }
+    
+    /**
+     * 记录向量检索结果日志
+     */
+    private void logVectorSearchResults(List<com.myspringairag.model.ScoredDocument> scoredDocs) {
+        log.info("Using parallel multi-query retrieval");
+        log.info("=== Vector Search Results with Scores ===");
+        for (int i = 0; i < scoredDocs.size(); i++) {
+            com.myspringairag.model.ScoredDocument sd = scoredDocs.get(i);
+            log.info("Rank {}: docId={}, originalScore={}, rrfScore={}, finalScore={}",
+                i+1, sd.getId(), sd.getOriginalScore(), sd.getRrfScore(), sd.getFinalScore());
+        }
+        log.info("===========================================");
+    }
+    
+    /**
+     * 将Map转换为ScoredDocument列表
+     */
+    private List<com.myspringairag.model.ScoredDocument> convertToScoredDocuments(Map<Long, Float> docScores) {
+        return docScores.entrySet().stream()
+            .map(entry -> new com.myspringairag.model.ScoredDocument(
+                entry.getKey(),
+                null,
+                entry.getValue(),
+                entry.getValue(),
+                entry.getValue()
+            ))
+            .collect(Collectors.toList());
+    }
+    
+    /**
+     * 处理候选文档并排序（包含重排序和关键词调整）
+     */
+    private List<Document> processAndRankDocuments(String question, VectorSearchResult searchResult) {
+        List<String> coreKeywords = tokenizationService.extractCoreKeywords(
+            queryRewriteService.rewrite(question));
+        
+        List<Document> candidateDocs = documentRepository.findByIds(searchResult.vectorResults);
+        
+        // 复制分数
+        if (searchResult.scoredDocs != null) {
+            copyScoresToDocuments(candidateDocs, searchResult.scoredDocs);
+        }
+        
+        // 关键词分数调整
+        candidateDocs = adjustCandidateScores(candidateDocs, coreKeywords);
+        if (candidateDocs.isEmpty()) {
+            return List.of();
+        }
+        
+        // 重排序或直接排序
+        if (useReranking && reranker != null) {
+            return rerankDocuments(question, candidateDocs);
+        } else {
+            return sortAndLimitCandidates(candidateDocs);
+        }
+    }
+    
+    /**
+     * 调整候选文档分数（关键词过滤）
+     */
+    private List<Document> adjustCandidateScores(List<Document> candidateDocs, List<String> coreKeywords) {
+        if (!coreKeywords.isEmpty()) {
+            candidateDocs = adjustScoreByKeywords(candidateDocs, coreKeywords);
+            
+            if (candidateDocs.isEmpty()) {
+                return List.of();
+            }
+            
+            // 过滤掉分数为0的文档
+            candidateDocs = candidateDocs.stream()
+                .filter(doc -> doc.getSimilarityScore() != null && doc.getSimilarityScore() > 0)
+                .collect(Collectors.toList());
+        }
+        return candidateDocs;
+    }
+    
+    /**
+     * 使用重排序模型对文档进行重排序
+     */
+    private List<Document> rerankDocuments(String question, List<Document> candidateDocs) {
+        try {
+            log.info("Using reranker to refine {} candidates", candidateDocs.size());
+            logCandidateDocuments(candidateDocs);
+            
+            // 构建重排序输入
+            String[] passages = candidateDocs.stream()
+                .map(doc -> doc.getParentContent() != null ? doc.getParentContent() : doc.getContent())
+                .toArray(String[]::new);
+            
+            // 执行重排序
+            Map<String, Float> rankedScores = reranker.rerankBatch(question, passages);
+            
+            // 取 top-K
+            List<Document> finalDocs = rankedScores.entrySet().stream()
+                .limit(topK)
+                .map(entry -> findDocByContent(candidateDocs, entry.getKey()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+            
+            log.info("After reranking: {} documents selected", finalDocs.size());
+            return finalDocs;
+            
+        } catch (Exception e) {
+            log.error("Reranking failed, fallback to score-based sorting", e);
+            // 重排序失败时，降级为按分数排序
+            return sortAndLimitCandidates(candidateDocs);
+        }
+    }
+    
+    /**
+     * 记录候选文档日志
+     */
+    private void logCandidateDocuments(List<Document> candidateDocs) {
+        log.info("=== Candidate Documents ===");
+        for (int i = 0; i < candidateDocs.size(); i++) {
+            Document doc = candidateDocs.get(i);
+            String contentPreview = doc.getParentContent() != null ? 
+                doc.getParentContent() : doc.getContent();
+            log.info("Candidate {}: id={}, filename={}, chunk={}/{}, content_preview={}, similarityScore={}",
+                i+1, doc.getId(), doc.getFilename(), 
+                doc.getChunkIndex()+1, doc.getTotalChunks(),
+                contentPreview.substring(0, Math.min(100, contentPreview.length())), doc.getSimilarityScore());
+        }
+        log.info("===========================");
+    }
+    
+    /**
+     * 按分数排序并限制返回数量
+     */
+    private List<Document> sortAndLimitCandidates(List<Document> candidateDocs) {
+        candidateDocs.sort((a, b) -> Double.compare(
+            b.getSimilarityScore() != null ? b.getSimilarityScore() : 0,
+            a.getSimilarityScore() != null ? a.getSimilarityScore() : 0
+        ));
+        return candidateDocs.stream()
+            .limit(topK)
+            .collect(Collectors.toList());
+    }
+    
+    /**
+     * 打印最终用于生成答案的文档及其分数
+     * @param finalDocs 最终文档列表
+     */
+    private void logFinalDocuments(List<Document> finalDocs) {
+        if (finalDocs == null || finalDocs.isEmpty()) {
+            return;
+        }
+        
+        log.info("=== Final Documents for Answer Generation ===");
+        for (int i = 0; i < finalDocs.size(); i++) {
+            Document doc = finalDocs.get(i);
+            String contentPreview = doc.getParentContent() != null ? 
+                doc.getParentContent() : doc.getContent();
+            log.info("Doc {}: id={}, filename={}, chunk={}/{}, preview={}, similarityScore={}",
+                i+1, doc.getId(), doc.getFilename(), 
+                doc.getChunkIndex()+1, doc.getTotalChunks(),
+                contentPreview.substring(0, Math.min(150, contentPreview.length())), doc.getSimilarityScore());
+        }
+        log.info("================================================");
+    }
+    
     /**
      * 根据内容查找文档
      */
