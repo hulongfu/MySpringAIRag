@@ -60,14 +60,8 @@ public class RagController {
                 log.warn("Large file upload: {} ({} MB)", file.getOriginalFilename(), fileSize / 1024 / 1024);
             }
             
-            // 3. 尝试获取上传许可（并发控制）
-            if (!asyncUploadService.tryAcquire()) {
-                response.put("success", false);
-                response.put("message", "当前有文件正在上传，请稍后再试");
-                return ResponseEntity.status(429).body(response);  // 429 Too Many Requests
-            }
-            
-            // 4. 提交异步任务（使用前端传来的taskId）
+            // 3. 提交异步任务（使用前端传来的taskId）
+            // 信号量管理已移至 Service 层内部，确保异常时也能正确释放
             asyncUploadService.submitUploadWithTaskId(file, taskId);
             
             response.put("success", true);
@@ -76,6 +70,13 @@ public class RagController {
             response.put("filename", file.getOriginalFilename());
             
             return ResponseEntity.ok(response);
+            
+        } catch (IllegalStateException e) {
+            // 信号量获取失败（系统繁忙）
+            log.warn("Upload rejected due to concurrent limit: {}", e.getMessage());
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.status(429).body(response);  // 429 Too Many Requests
             
         } catch (Exception e) {
             log.error("Upload failed", e);

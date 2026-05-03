@@ -4,6 +4,7 @@ import com.myspringairag.controller.SseController;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -29,62 +30,84 @@ public class AsyncUploadService {
     private RagService ragService;
 
     @Autowired
-    private AsyncUploadService self; // 注入自身代理
+    @Lazy
+    private AsyncUploadService self; // 注入自身代理（使用@Lazy解决循环依赖）
 
     // 信号量：只允许1个并发上传任务
     private final Semaphore uploadSemaphore = new Semaphore(1);
 
     /**
-     * 尝试获取上传许可
-     */
-    public boolean tryAcquire() {
-        return uploadSemaphore.tryAcquire();
-    }
-
-    /**
-     * 提交异步上传任务（使用前端传来的taskId）
+     * 提交异步上传任务（使用前端传来的taskId）- 安全版本
+     * 在方法内部管理信号量，确保异常时也能正确释放
      */
     public void submitUploadWithTaskId(MultipartFile file, String taskId) throws IOException {
-        // 1. 确保uploads目录存在
-        Path uploadPath = Paths.get(uploadDir);
-        Files.createDirectories(uploadPath);
+        // 1. 尝试获取信号量许可
+        if (!uploadSemaphore.tryAcquire()) {
+            throw new IllegalStateException("当前有文件正在上传，请稍后再试");
+        }
         
-        // 2. 保存临时文件到uploads目录（使用时间戳避免重名）
-        String originalFilename = file.getOriginalFilename();
-        String timestamp = String.valueOf(System.currentTimeMillis());
-        String tempFilename = "temp_" + timestamp + "_" + originalFilename;
-        Path tempFile = uploadPath.resolve(tempFilename);
-        file.transferTo(tempFile.toFile());
-        
-        // 3. 提交异步任务（使用前端传来的taskId）
-        self.processDocument(taskId, tempFile, originalFilename);
-        
-        log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
+        try {
+            // 2. 确保uploads目录存在
+            Path uploadPath = Paths.get(uploadDir);
+            Files.createDirectories(uploadPath);
+            
+            // 3. 保存临时文件到uploads目录（使用时间戳避免重名）
+            String originalFilename = file.getOriginalFilename();
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String tempFilename = "temp_" + timestamp + "_" + originalFilename;
+            Path tempFile = uploadPath.resolve(tempFilename);
+            file.transferTo(tempFile.toFile());
+            
+            // 4. 提交异步任务（使用前端传来的taskId）
+            self.processDocument(taskId, tempFile, originalFilename);
+            
+            log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
+            
+        } catch (Exception e) {
+            // 如果保存文件失败，必须立即释放信号量，否则服务将死锁
+            uploadSemaphore.release();
+            log.error("Failed to submit upload task: {}", taskId, e);
+            throw e;
+        }
     }
 
     /**
-     * 提交异步上传任务（旧方法，保留兼容）
+     * 提交异步上传任务（旧方法，保留兼容）- 安全版本
+     * 在方法内部管理信号量，确保异常时也能正确释放
      */
     public String submitUpload(MultipartFile file) throws IOException {
-        // 1. 确保uploads目录存在
-        Path uploadPath = Paths.get(uploadDir);
-        Files.createDirectories(uploadPath);
+        // 1. 尝试获取信号量许可
+        if (!uploadSemaphore.tryAcquire()) {
+            throw new IllegalStateException("当前有文件正在上传，请稍后再试");
+        }
         
-        // 2. 保存临时文件到uploads目录（使用时间戳避免重名）
-        String originalFilename = file.getOriginalFilename();
-        String timestamp = String.valueOf(System.currentTimeMillis());
-        String tempFilename = "temp_" + timestamp + "_" + originalFilename;
-        Path tempFile = uploadPath.resolve(tempFilename);
-        file.transferTo(tempFile.toFile());
-        
-        // 3. 生成任务ID
-        String taskId = UUID.randomUUID().toString();
-        
-        // 4. 提交异步任务
-        self.processDocument(taskId, tempFile, originalFilename);
-        
-        log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
-        return taskId;
+        try {
+            // 2. 确保uploads目录存在
+            Path uploadPath = Paths.get(uploadDir);
+            Files.createDirectories(uploadPath);
+            
+            // 3. 保存临时文件到uploads目录（使用时间戳避免重名）
+            String originalFilename = file.getOriginalFilename();
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String tempFilename = "temp_" + timestamp + "_" + originalFilename;
+            Path tempFile = uploadPath.resolve(tempFilename);
+            file.transferTo(tempFile.toFile());
+            
+            // 4. 生成任务ID
+            String taskId = UUID.randomUUID().toString();
+            
+            // 5. 提交异步任务
+            self.processDocument(taskId, tempFile, originalFilename);
+            
+            log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
+            return taskId;
+            
+        } catch (Exception e) {
+            // 如果保存文件失败，必须立即释放信号量，否则服务将死锁
+            uploadSemaphore.release();
+            log.error("Failed to submit upload task", e);
+            throw e;
+        }
     }
 
     /**

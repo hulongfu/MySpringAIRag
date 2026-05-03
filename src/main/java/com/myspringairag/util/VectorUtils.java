@@ -30,15 +30,4 @@ public class VectorUtils {
     public static VectorFloat<?> toVectorFloat(float[] vector) {
         return VTS.createFloatVector(vector);
     }
-    
-    /**
-     * 将VectorFloat转换为float[]
-     */
-    public static float[] toFloatArray(VectorFloat<?> vector) {
-        float[] result = new float[vector.length()];
-        for (int i = 0; i < vector.length(); i++) {
-            result[i] = vector.get(i);
-        }
-        return result;
-    }
 }
