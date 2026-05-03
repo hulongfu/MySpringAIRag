@@ -28,6 +28,9 @@ public class AsyncUploadService {
     @Autowired
     private RagService ragService;
 
+    @Autowired
+    private AsyncUploadService self; // 注入自身代理
+
     // 信号量：只允许1个并发上传任务
     private final Semaphore uploadSemaphore = new Semaphore(1);
 
@@ -54,7 +57,7 @@ public class AsyncUploadService {
         file.transferTo(tempFile.toFile());
         
         // 3. 提交异步任务（使用前端传来的taskId）
-        processDocument(taskId, tempFile, originalFilename);
+        self.processDocument(taskId, tempFile, originalFilename);
         
         log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
     }
@@ -78,7 +81,7 @@ public class AsyncUploadService {
         String taskId = UUID.randomUUID().toString();
         
         // 4. 提交异步任务
-        processDocument(taskId, tempFile, originalFilename);
+        self.processDocument(taskId, tempFile, originalFilename);
         
         log.info("Upload task submitted: {} for file: {}", taskId, originalFilename);
         return taskId;
