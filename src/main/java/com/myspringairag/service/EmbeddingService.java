@@ -1,5 +1,7 @@
 package com.myspringairag.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
@@ -9,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -19,15 +22,12 @@ public class EmbeddingService {
     // 注入统一的并行计算线程池
     private final ExecutorService parallelExecutor;
     
-    // 线程安全的LRU缓存：最多缓存500个embedding（增加容量）
-    private final Map<String, float[]> embeddingCache = Collections.synchronizedMap(
-        new LinkedHashMap<String, float[]>(500, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
-                return size() > 500; // 增加到500个缓存项
-            }
-        }
-    );
+    // Caffeine 缓存：最多缓存1000个embedding，10分钟未访问则淘汰
+    private final Cache<String, float[]> embeddingCache = Caffeine.newBuilder()
+        .maximumSize(1000)  // 最多1000条（BGE-Small-ZH: 384维 × 4字节 ≈ 1.5MB）
+        .expireAfterAccess(10, TimeUnit.MINUTES)  // 10分钟未访问则淘汰
+        .recordStats()  // 记录统计信息（用于监控缓存命中率）
+        .build();
     
     public EmbeddingService(EmbeddingModel embeddingModel, 
                            @Qualifier("parallelComputeExecutor") ExecutorService parallelExecutor) {
@@ -59,10 +59,9 @@ public class EmbeddingService {
         }
         
         // 检查缓存
-        synchronized (embeddingCache) {
-            if (embeddingCache.containsKey(text)) {
-                return embeddingCache.get(text).clone(); // 返回副本，避免外部修改
-            }
+        float[] cached = embeddingCache.getIfPresent(text);
+        if (cached != null) {
+            return cached.clone(); // 返回副本，避免外部修改
         }
         
         try {
@@ -76,9 +75,7 @@ public class EmbeddingService {
             float[] vector = embeddings.get(0);
             
             // 存入缓存
-            synchronized (embeddingCache) {
-                embeddingCache.put(text, vector.clone());
-            }
+            embeddingCache.put(text, vector.clone());
             
             return vector;
         } catch (Exception e) {
@@ -132,7 +129,7 @@ public class EmbeddingService {
             
             for (int i = 0; i < filteredTexts.size(); i++) {
                 String text = filteredTexts.get(i);
-                float[] cached = embeddingCache.get(text);
+                float[] cached = embeddingCache.getIfPresent(text);
                 if (cached != null) {
                     results.set(i, cached.clone());
                     cachedCount++;
@@ -180,9 +177,15 @@ public class EmbeddingService {
             }
             
             long duration = System.currentTimeMillis() - startTime;
-            log.info("Batch embedding completed: {} texts in {}ms (cache hit rate: {}%)",
+            
+            // 输出缓存统计信息
+            var stats = embeddingCache.stats();
+            double hitRatePercent = stats.hitRate() * 100;
+            log.info("Batch embedding completed: {} texts in {}ms (cache hit rate: {}%, total hits: {}, total misses: {})",
                 filteredTexts.size(), duration, 
-                filteredTexts.size() > 0 ? (cachedCount * 100 / filteredTexts.size()) : 0);
+                String.format("%.1f", hitRatePercent),
+                stats.hitCount(),
+                stats.missCount());
             
             return results;
             

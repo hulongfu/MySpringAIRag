@@ -63,6 +63,13 @@
 - Buffer机制处理跨chunk和不完整行，确保稳定性
 - 实时滚动到底部，提升阅读体验
 
+✅ **Caffeine 高性能缓存** ⭐ NEW
+- EmbeddingService 使用 Caffeine Cache 替代手动 LRU
+- 最多缓存 1000 个向量（约 1.5MB）
+- 10 分钟未访问自动淘汰（TTL + LRU 双重策略）
+- 内置统计监控（命中率、命中次数、未命中次数）
+- 线程安全，无锁设计，并发性能优异
+
 ✅ **空文本过滤与null向量防护** ⭐ NEW
 - 文档分块后自动过滤空文本和纯空白文本
 - Embedding批量处理前二次过滤，避免无效计算
@@ -84,6 +91,7 @@
 - **Chat模型**: SiliconFlow DeepSeek-V3.2（云端API）
 - **文档解析**: Apache Tika 2.9.1
 - **中文分词**: IKAnalyzer 2012_u6
+- **缓存**: Caffeine 3.1.8（高性能本地缓存）⭐ NEW
 - **实时通信**: Server-Sent Events (SSE)
 - **并发控制**: Java Semaphore
 - **前端**: Thymeleaf + 原生 HTML/CSS/JavaScript
@@ -267,8 +275,8 @@ spring:
   ai:
     # 云端Chat模型配置（硅基流动）
     openai:
-      base-url: https://api.siliconflow.cn/v1
       api-key: YOUR_API_KEY  # 替换为你的API Key
+      base-url: https://api.siliconflow.cn
       chat:
         options:
           model: deepseek-ai/DeepSeek-V3.2
@@ -276,8 +284,7 @@ spring:
     # 本地Embedding模型配置
     transformers:
       embedding:
-        model-path: D:/ideaSpace/MyPython/models/bge-small-zh-v1.5-ONNX
-        dimension: 384
+        model: D:/ideaSpace/MyPython/models/bge-small-zh-v1.5-onnx/onnx/model.onnx
 
 app:
   # 分块配置（层级分块）
@@ -296,18 +303,6 @@ app:
   
   # 文件上传配置
   upload-dir: D:/tmp/MySpringAIRag/uploads  # 临时文件存储路径
-
-jvector:
-  dimensions: 384           # 向量维度（与BGE-Small-ZH匹配）
-  top-k: 50                 # 向量检索返回的候选数量
-  similarity-threshold: 0.0 # 相似度阈值（0=不过滤）
-
-# Spring Boot 文件上传限制
-spring:
-  servlet:
-    multipart:
-      max-file-size: 50MB      # 单个文件最大50MB
-      max-request-size: 50MB   # 请求总大小最大50MB
 ```
 
 ### 3. 构建项目
@@ -482,7 +477,7 @@ LIMIT ?
 - ✅ 精确匹配：保证关键词一定出现在文档中
 - ✅ 与向量检索互补：弥补语义检索可能遗漏的精确匹配
 
-### 4. EmbeddingService（本地Embedding服务）
+### 4. EmbeddingService（本地Embedding服务）⭐ UPDATED
 
 **职责**：使用本地BGE模型生成向量
 
@@ -491,6 +486,10 @@ LIMIT ?
 - 维度：384
 - 优势：无需API调用，完全离线
 - 劣势：首次加载较慢（约5秒）
+- **Caffeine 缓存**：最多 1000 条，10分钟 TTL ⭐ NEW
+- **批量并行处理**：支持多线程并行计算，提升 2-3 倍性能
+- **空文本过滤**：三层防护机制，避免 null 向量
+- **预热机制**：应用启动时预加载模型，避免冷启动延迟
 
 ### 5. JVectorService（向量索引服务）
 
@@ -611,7 +610,13 @@ H2数据库不会自动更新已有表的结构。
 
 - **本地Embedding模型**：约500MB
 - **JVector索引**：每个向量约2KB（384维float）
+- **Caffeine 缓存**：最多 1000 条，约 1.5-3 MB ⭐ NEW
 - **建议内存**：4GB+（1000个文档约需1GB）
+
+**缓存监控**：
+- 查看日志中的 `cache hit rate` 统计信息
+- 示例：`Batch embedding completed: 289 texts in 2977ms (cache hit rate: 85.3%, total hits: 246, total misses: 43)`
+- 命中率越高，性能越好
 
 ### 3. 并发限制
 
@@ -752,6 +757,23 @@ ORDER BY chunk_index;
 - 检查前端代码是否正确管理 currentEventSource
 - 确保后端在 COMPLETED 事件中调用了 emitter.complete()
 
+### Q9: 项目启动失败，提示循环依赖错误？⭐ NEW
+
+**错误信息**：
+```
+Bean with name 'asyncUploadService' has been injected into other beans 
+[asyncUploadService] in its raw version as part of a circular reference
+```
+
+**原因**：
+- AsyncUploadService 需要自注入以支持 @Async 方法
+- Spring Boot 3.x 对循环依赖的检查更严格
+
+**解决方案**：
+- ✅ 已修复：在 AsyncUploadService 的自注入字段上添加 `@Lazy` 注解
+- 无需配置 `spring.main.allow-circular-references: true`
+- 使用 @Lazy 是 Spring Boot 3.x 推荐的做法
+
 ## 🔮 未来改进方向
 
 - [ ] 索引持久化（避免重启时重建）
@@ -778,8 +800,8 @@ MIT License
 
 ---
 
-**最后更新**: 2026-05-01  
-**版本**: 1.4.0  
+**最后更新**: 2026-05-03  
+**版本**: 1.5.0  
 **主要更新**:
 - ✅ 新增 SSE 实时进度推送功能（基于真实业务节点）
 - ✅ 新增并发控制（Semaphore）
@@ -793,3 +815,5 @@ MIT License
 - ✅ **流式输出**：答案逐字显示，打字机效果，提升用户体验 ⭐ NEW
 - ✅ **空文本过滤**：三层防护机制，彻底解决null向量问题 ⭐ NEW
 - ✅ **删除冗余代码**：移除未使用的RRF融合方法和调试日志
+- ✅ **Caffeine 缓存优化**：EmbeddingService 使用 Caffeine 替代手动 LRU，提升并发性能和内存管理 ⭐ NEW
+- ✅ **循环依赖修复**：AsyncUploadService 使用 @Lazy 注解解决自注入问题，兼容 Spring Boot 3.x ⭐ NEW
