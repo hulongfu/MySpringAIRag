@@ -1,6 +1,6 @@
 # MySpringAIRag - 智能RAG知识库问答系统
 
-基于 **JVector + H2 + Spring AI** 的轻量级 RAG（检索增强生成）应用，采用层级分块策略、并行多查询变体检索、关键词分数调整和**流式输出**，显著提升检索准确性和用户体验。
+基于 **JVector + H2 + Spring AI** 的轻量级 RAG（检索增强生成）应用，采用层级分块策略、混合并行检索（向量+关键词）、BGE重排序和**流式输出**，显著提升检索准确性和用户体验。
 
 ## 🎯 核心特性
 
@@ -75,6 +75,32 @@
 - Embedding批量处理前二次过滤，避免无效计算
 - JVector序列化前严格检查，防止NullPointerException
 - 三层防护机制确保系统健壮性
+
+✅ **混合向量存储架构** ⭐ NEW
+- 热数据层：Caffeine缓存最近访问的向量（默认10000条，30分钟过期）
+- 持久化层：H2数据库存储所有向量数据
+- 索引层：JVector HNSW图索引（启动时从数据库构建）
+- 优势：避免全量向量常驻内存，防止OOM；热数据快速访问，冷数据按需加载
+
+✅ **软删除与双保险清理机制** ⭐ NEW
+- 软删除标记：删除文档时先将docId加入deletedDocIds集合，搜索时自动过滤
+- 即时清理：删除文档后立即调用performCleanupWithoutOrphanDetection()重建索引，确保搜索不包含已删除文档
+- 定时清理：每天凌晨2点自动调用performCleanupWithOrphanDetection()，包含以下两步：
+  1. **扫描孤儿数据**：使用LEFT JOIN查询vectors表中存在但documents表中不存在的doc_id
+  2. **清理并重建索引**：将孤儿数据加入软删除集合，从数据库删除，然后重建HNSW索引
+- 双保险设计：两者都重建索引，区别在于触发时机和是否扫描孤儿数据
+  - 即时清理：同步阻塞执行，追求“快”，保证正常流程下的快速响应（不扫描孤儿数据）
+  - 定时清理：异步超时保护（30分钟），追求“稳”，处理异常情况下的最终一致性（扫描孤儿数据）
+- 容错保障：处理程序非正常退出、事务回滚失败、手动删除数据库等边缘情况
+- 孤儿数据清理：通过SQL LEFT JOIN扫描并清理documents表已删除但vectors表仍残留的数据
+
+✅ **事务一致性与异步索引重建** ⭐ NEW
+- **三阶段分离架构**：持久化（事务内）→ 内存更新（事务提交后）→ 索引重建（异步）
+- **TransactionSynchronizationManager**：确保内存状态只在数据库事务成功后更新
+- **数据一致性保证**：DOCUMENTS表和VECTORS表在同一事务中原子性提交/回滚
+- **异步索引构建**：rebuildIndex在后台线程执行，不阻塞用户请求
+- **性能优化**：用户上传后可立即收到响应（80%进度），索引在后台构建（90%进度）
+- **容错机制**：多层兜底（事务回滚检测、异步失败日志、定时任务修复、应用重启加载）
 
 ✅ **前后端一体化**  
 - Thymeleaf + 原生 HTML/CSS/JavaScript
@@ -215,6 +241,70 @@
 │  事件，重置 UI 状态   │   恢复按钮为"上传文档"
 └─────────────────────┘
 ```
+
+### 数据处理流程详解（上传文档）⭐ UPDATED
+
+**步骤1：文档解析与分块**
+```
+用户上传文档
+    ↓
+DocumentParserService 解析文档内容
+    ↓
+HierarchicalChunkingService 层级分块
+    ├─ 语义分块：生成大块（parentContent）
+    └─ 二次切分：生成小块（content，~200 tokens）
+```
+
+**步骤2：数据库存储（DOCUMENTS表）**
+```
+for each chunk:
+    Document doc = new Document()
+    doc.setFilename(filename)
+    doc.setContent(chunk)              // 小块内容
+    doc.setParentContent(parentContent) // 大块内容
+    doc.setChunkIndex(i)
+    doc.setTotalChunks(total)
+    
+    documentRepository.save(doc)       // 插入DOCUMENTS表，获取自增ID
+    docIds.add(savedDoc.getId())
+```
+
+**步骤3：向量生成与存储（VECTORS表）**
+```
+vectors = embeddingService.embedBatch(chunks)  // 批量生成向量
+jVectorService.persistVectorsOnly(docIds, vectors) // 仅持久化到VECTORS表（事务内）
+    ↓
+    for each (docId, vector):
+        INSERT INTO vectors (doc_id, vector_data, dimension)
+        VALUES (?, ?, ?)
+```
+
+**步骤4：事务提交与内存更新**
+```
+@Transactional 方法退出 → 事务 T1 提交
+    ↓
+TransactionSynchronization.afterCommit() 触发
+    ↓
+Phase 2: jVectorService.updateMemoryState(docIds, vectors)
+    ├─ 幂等性检查（避免重复添加）
+    ├─ 更新热缓存 hotVectorCache.put(docId, vector)
+    └─ 更新映射关系 nodeIdToDocIdMap / docIdToNodeIdMap
+    ↓
+Phase 3: jVectorService.scheduleRebuildIndexAsync()
+    └─ CompletableFuture.runAsync(() -> rebuildIndex())
+        ├─ Phase 1: 加载元数据（nodeId <-> docId映射）
+        ├─ Phase 2: 临时全量加载向量到内存
+        ├─ Phase 3: 构建HNSW图索引
+        └─ Phase 4: 清理临时数据，释放内存
+```
+
+**关键点：**
+- ✅ **先插DOCUMENTS表，再插VECTORS表**：确保外键约束正确
+- ✅ **批量操作优化**：向量生成和存储都使用批量接口
+- ✅ **事务一致性**：DOCUMENTS和VECTORS在同一事务T1中，原子性提交/回滚
+- ✅ **内存一致性**：只在事务提交后才更新内存状态，避免脏数据
+- ✅ **异步索引构建**：rebuildIndex在后台执行，不阻塞用户请求
+- ✅ **用户体验优化**：80%进度即可返回，90%进度推送索引构建中
 
 ## 📁 项目结构
 
@@ -491,15 +581,50 @@ LIMIT ?
 - **空文本过滤**：三层防护机制，避免 null 向量
 - **预热机制**：应用启动时预加载模型，避免冷启动延迟
 
-### 5. JVectorService（向量索引服务）
+### 5. JVectorService（向量索引服务）⭐ UPDATED
 
-**职责**：管理JVector向量索引
+**职责**：管理JVector向量索引（混合架构：内存热缓存 + 磁盘索引）
+
+**架构设计**：
+1. **热数据层**：Caffeine缓存最近访问的向量（默认10000条，30分钟过期）
+2. **持久化层**：H2数据库存储所有向量数据
+3. **索引层**：JVector HNSW图索引（启动时从数据库构建）
 
 **特点**：
 - 算法：HNSW（Hierarchical Navigable Small World）
 - 相似度：余弦相似度
 - 持久化：重启时从H2重建索引
-- 性能：支持百万级向量检索
+- 性能：支持百万级向量数据存储
+- **内存优化**：避免全量向量常驻内存，防止OOM
+- **按需加载**：热数据快速访问，冷数据从数据库加载
+
+**核心方法**：
+- `persistVectorsOnly(docIds, vectors)`：仅持久化到数据库（在事务内调用）
+- `updateMemoryState(docIds, vectors)`：更新内存状态（在事务提交后调用）
+- `scheduleRebuildIndexAsync()`：异步调度索引重建
+- `addVectorsBatch(docIds, vectors)`：批量添加（旧方法，保留向后兼容）
+
+**软删除机制**：
+- 删除文档时，先将docId加入`deletedDocIds`集合（软删除）
+- 搜索时过滤掉已删除的docId
+- 定期清理：通过定时任务或强制清理移除已删除向量
+
+**双保险清理机制** ⭐ NEW：
+1. **即时清理**（`forceCleanupDeletedVectors`）：
+   - 触发时机：删除文档后立即执行
+   - 目的：快速重建索引，确保搜索不包含已删除文档
+   - 特点：同步执行，阻塞调用方
+   
+2. **定时清理**（`@Scheduled(cron = "0 0 2 * * ?")`）：
+   - 触发时机：每天凌晨2点
+   - 目的：兜底保障，处理异常情况下的孤儿数据
+   - 特点：异步执行，超时保护（30分钟）
+   
+**为什么需要双保险？**
+- **异常容错**：如果即时清理因异常中断，定时任务作为兜底
+- **孤儿数据清理**：处理程序非正常退出、事务回滚失败等边缘情况
+- **内存与磁盘同步**：确保内存索引、数据库、磁盘文件三者一致
+- **设计理念**：即时清理追求“快”，定时清理追求“稳”和“全”
 
 ### 6. AsyncUploadService（异步上传服务）⭐ NEW
 
@@ -537,7 +662,9 @@ LIMIT ?
 **职责**：协调整个RAG流程
 
 **关键方法**：
-- `uploadDocument()`：上传文档并建立索引
+- `uploadDocument(file)`：上传文档并建立索引（MultipartFile版本）
+- `uploadDocumentFromPath(filePath, filename)`：从文件路径上传（异步版本）
+- `processAndIndex(text, filename, fileSize, mimeType)`：处理文本并持久化（返回UploadResult）
 - `answerQuestion()`：回答问题（同步版本）
   - 查询重写
   - 并行多查询变体检索
@@ -550,6 +677,42 @@ LIMIT ?
   - 事件类型：start、token、complete、error
 - `buildContext()`：构建上下文（优先返回parentContent）
 - `adjustScoreByKeywords()`：根据关键词匹配比例调整分数 ⭐ NEW
+
+**事务管理机制** ⭐ NEW：
+```java
+@Transactional
+public void uploadDocumentFromPath(Path filePath, String filename) {
+    // Phase 1: 持久化到数据库（在事务内）
+    UploadResult result = processAndIndex(...);
+    
+    // 注册事务提交后的回调
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                // Phase 2: 更新内存状态
+                jVectorService.updateMemoryState(result.docIds, result.vectors);
+                
+                // Phase 3: 异步重建索引
+                jVectorService.scheduleRebuildIndexAsync();
+            }
+            
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_ROLLED_BACK) {
+                    log.warn("Transaction rolled back for file: {}", filename);
+                }
+            }
+        }
+    );
+}
+```
+
+**关键特性**：
+- ✅ **三阶段分离**：持久化 → 内存更新 → 索引重建
+- ✅ **事务一致性**：确保数据库和内存状态的最终一致性
+- ✅ **异步优化**：索引重建不阻塞用户请求
+- ✅ **容错完善**：多层兜底机制（事务回滚、异步失败、定时任务、应用重启）
 
 ## ⚙️ 配置优化指南
 
@@ -800,14 +963,14 @@ MIT License
 
 ---
 
-**最后更新**: 2026-05-03  
-**版本**: 1.5.0  
+**最后更新**: 2026-05-06  
+**版本**: 1.7.0  
 **主要更新**:
 - ✅ 新增 SSE 实时进度推送功能（基于真实业务节点）
 - ✅ 新增并发控制（Semaphore）
 - ✅ 优化临时文件管理（自动清理）
 - ✅ 修复前端重复提交问题
-- ✅ 完善 SSE 连接管理（避免误报"连接中断"）
+- ✅ 完善 SSE 连接管理（避免误报“连接中断”）
 - ✅ 修复 Word 文档解析问题（支持 .doc 和 .docx）
 - ✅ 优化进度推送逻辑（移除伪延迟，基于实际业务节点）
 - ✅ **语义分块优化**：相似度阈值提升至 0.85，添加最小分块保护 ⭐ NEW
@@ -817,3 +980,12 @@ MIT License
 - ✅ **删除冗余代码**：移除未使用的RRF融合方法和调试日志
 - ✅ **Caffeine 缓存优化**：EmbeddingService 使用 Caffeine 替代手动 LRU，提升并发性能和内存管理 ⭐ NEW
 - ✅ **循环依赖修复**：AsyncUploadService 使用 @Lazy 注解解决自注入问题，兼容 Spring Boot 3.x ⭐ NEW
+- ✅ **混合向量存储架构**：JVectorService 采用热缓存+磁盘索引混合架构，支持百万级向量 ⭐ NEW
+- ✅ **软删除与双保险清理**：即时清理+定时清理双保险机制，确保数据一致性 ⭐ NEW
+- ✅ **rebuildIndex优化**：使用临时存储替代Map，减少内存占用，提升索引构建速度 ⭐ NEW
+- ✅ **事务一致性与异步索引重建** ⭐ NEW
+  - 三阶段分离架构：持久化 → 内存更新 → 索引重建
+  - TransactionSynchronizationManager 确保内存状态只在事务提交后更新
+  - DOCUMENTS和VECTORS表在同一事务中原子性提交/回滚
+  - rebuildIndex异步执行，不阻塞用户请求
+  - 多层容错机制：事务回滚检测、异步失败日志、定时任务修复、应用重启加载

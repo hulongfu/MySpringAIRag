@@ -205,6 +205,53 @@ public class RagController {
         }
     }
     
+    /**
+     * 获取软删除统计信息（用于监控）
+     */
+    @GetMapping("/admin/deleted-stats")
+    public ResponseEntity<Map<String, Object>> getDeletedStats() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            // 从JVectorService获取统计信息
+            Map<String, Object> stats = ragService.getJVectorDeletedStats();
+            
+            response.put("success", true);
+            response.put("data", stats);
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Failed to get deleted stats", e);
+            response.put("success", false);
+            response.put("message", "获取统计信息失败: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+    }
+    
+    /**
+     * 手动触发清理已删除向量（管理员操作）
+     */
+    @PostMapping("/admin/cleanup-deleted")
+    public ResponseEntity<Map<String, Object>> manualCleanup() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            ragService.manualCleanupDeletedVectors();
+            
+            response.put("success", true);
+            response.put("message", "清理任务已触发");
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Manual cleanup failed", e);
+            response.put("success", false);
+            response.put("message", "清理失败: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+    }
+    
     @Data
     public static class QuestionRequest {
         private String question;

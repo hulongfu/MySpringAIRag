@@ -9,6 +9,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -106,7 +108,37 @@ public class RagService {
                 throw new IllegalArgumentException("Document is empty or could not be parsed");
             }
             
-            processAndIndex(text, file.getOriginalFilename(), file.getSize(), file.getContentType());
+            // Phase 1: 处理并持久化到数据库（在事务内）
+            UploadResult result = processAndIndex(text, file.getOriginalFilename(), file.getSize(), file.getContentType());
+            
+            // 注册事务提交后的回调（Phase 2 & 3）
+            TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        try {
+                            log.info("Transaction committed, updating memory state for {} vectors", 
+                                result.docIds.size());
+                            
+                            // Phase 2: 更新内存状态
+                            jVectorService.updateMemoryState(result.docIds, result.vectors);
+                            
+                            // Phase 3: 异步重建索引
+                            jVectorService.scheduleRebuildIndexAsync();
+                            
+                            log.info("Memory state updated and index rebuild scheduled");
+                            
+                        } catch (Exception e) {
+                            log.error("⚠️ CRITICAL: Failed to update memory state after commit. " +
+                                      "Database committed but memory not updated for file: {}. " +
+                                      "Affected docIds count: {}. " +
+                                      "This will be fixed by scheduled task (daily at 2 AM) or next application restart. " +
+                                      "Impact: Search may return incomplete results until memory is synced.",
+                                file.getOriginalFilename(), result.docIds.size(), e);
+                        }
+                    }
+                }
+            );
             
         } catch (Exception e) {
             log.error("Failed to upload document: {}", file.getOriginalFilename(), e);
@@ -173,7 +205,54 @@ public class RagService {
             long fileSize = Files.size(filePath);
             String mimeType = Files.probeContentType(filePath);
             
-            processAndIndex(text, filename, fileSize, mimeType);
+            // Phase 1: 处理并持久化到数据库（在事务内）
+            UploadResult result = processAndIndex(text, filename, fileSize, mimeType);
+            
+            // 注册事务提交后的回调（Phase 2 & 3）
+            TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        try {
+                            log.info("Transaction committed, updating memory state for {} vectors", 
+                                result.docIds.size());
+                            
+                            // Phase 2: 更新内存状态
+                            jVectorService.updateMemoryState(result.docIds, result.vectors);
+                            
+                            // Phase 3: 异步重建索引
+                            jVectorService.scheduleRebuildIndexAsync();
+                            
+                            // 90% - 索引重建已调度
+                            if (taskId != null) {
+                                sseController.notifyProgress(taskId, 90, "索引构建中...");
+                            }
+                            
+                            log.info("Memory state updated and index rebuild scheduled");
+                            
+                        } catch (Exception e) {
+                            log.error("⚠️ CRITICAL: Failed to update memory state after commit. " +
+                                      "Database committed but memory not updated for file: {}. " +
+                                      "Affected docIds count: {}. " +
+                                      "This will be fixed by scheduled task (daily at 2 AM) or next application restart. " +
+                                      "Impact: Search may return incomplete results until memory is synced.",
+                                filename, result.docIds.size(), e);
+                            // 记录错误，但不影响事务（已提交）
+                            // 定时任务会修复
+                        }
+                    }
+                    
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK) {
+                            log.warn("Transaction rolled back for file: {}", filename);
+                            // 事务回滚，不需要清理内存（因为还没更新）
+                        }
+                    }
+                }
+            );
+            
+            log.info("Document persisted successfully: {} ({} chunks)", filename, result.docIds.size());
             
         } catch (Exception e) {
             log.error("Failed to upload document from path: {}", filePath, e);
@@ -182,9 +261,24 @@ public class RagService {
     }
     
     /**
-     * 处理文本并建立索引（公共逻辑）
+     * 上传结果封装类
      */
-    private void processAndIndex(String text, String filename, long fileSize, String mimeType) {
+    private static class UploadResult {
+        List<Long> docIds;
+        List<float[]> vectors;
+        
+        UploadResult(List<Long> docIds, List<float[]> vectors) {
+            this.docIds = docIds;
+            this.vectors = vectors;
+        }
+    }
+    
+    /**
+     * 处理文本并建立索引（公共逻辑）
+     * 【修改】现在只持久化到数据库，不更新内存索引
+     * 【返回】UploadResult 包含 docIds 和 vectors，供事务回调使用
+     */
+    private UploadResult processAndIndex(String text, String filename, long fileSize, String mimeType) {
         String taskId = getCurrentTaskId();
         
         // 2. 分割文本（使用层级分块）
@@ -276,23 +370,18 @@ public class RagService {
             sseController.notifyProgress(taskId, 70, "正在批量存储向量...");
         }
         
-        // 4. 批量添加到JVector索引（不重建索引）
-        jVectorService.addVectorsBatch(docIds, vectors);
+        // 4. 【关键修改】只持久化到数据库，不更新内存索引
+        jVectorService.persistVectorsOnly(docIds, vectors);
         
         // 80% - 向量存储完成
         if (taskId != null) {
-            sseController.notifyProgress(taskId, 80, "正在构建向量索引...");
+            sseController.notifyProgress(taskId, 80, "向量持久化完成...");
         }
         
-        // 5. 一次性重建索引（性能优化关键！）
-        jVectorService.rebuildIndex();
+        log.info("Successfully persisted document to database: {} ({} chunks)", filename, docIds.size());
         
-        // 90% - 索引构建完成
-        if (taskId != null) {
-            sseController.notifyProgress(taskId, 90, "索引构建完成...");
-        }
-        
-        log.info("Successfully uploaded and indexed document: {} ({} chunks)", filename, chunks.size());
+        // 5. 【关键修改】返回结果，供事务回调使用
+        return new UploadResult(docIds, vectors);
     }
     
     /**
@@ -835,5 +924,19 @@ public class RagService {
         }
         
         return context.toString();
+    }
+    
+    /**
+     * 获取JVector软删除统计信息（代理方法）
+     */
+    public Map<String, Object> getJVectorDeletedStats() {
+        return jVectorService.getDeletedStats();
+    }
+    
+    /**
+     * 手动触发清理已删除向量（代理方法）
+     */
+    public void manualCleanupDeletedVectors() {
+        jVectorService.manualCleanup();
     }
 }
