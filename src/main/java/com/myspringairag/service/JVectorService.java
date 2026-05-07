@@ -55,6 +55,19 @@ public class JVectorService {
     @Value("${jvector.similarity-threshold}")
     private float similarityThreshold;
     
+    // === 安全模式配置（防止OOM）===
+    @Value("${jvector.safe-mode:true}")
+    private boolean safeMode;
+    
+    @Value("${jvector.max-memory-ratio:0.5}")
+    private double maxMemoryRatio;
+    
+    @Value("${jvector.gc-threshold:0.85}")
+    private double gcThreshold;
+    
+    @Value("${jvector.emergency-gc-threshold:0.9}")
+    private double emergencyGcThreshold;
+    
     // JVector索引
     // volatile保证索引重建时的可见性
     private volatile GraphIndex graphIndex;
@@ -91,6 +104,8 @@ public class JVectorService {
     @PostConstruct
     public void init() {
         log.info("Initializing JVector hybrid architecture (cache + disk index) with dimensions={}", dimensions);
+        log.info("Safe mode: {} (max_memory_ratio={}, gc_threshold={}, emergency_threshold={})", 
+            safeMode, maxMemoryRatio, gcThreshold, emergencyGcThreshold);
         
         try {
             // 创建索引目录
@@ -350,15 +365,113 @@ public class JVectorService {
     
     /**
      * 临时全量加载所有向量到List(仅用于启动时构建索引)
+     * 
+     * 【安全模式】当 jvector.safe-mode=true 时：
+     * - 动态计算批次大小（基于可用内存）
+     * - 实时监控内存使用率
+     * - 自动触发 GC 防止 OOM
+     * - 超过阈值时抛出友好异常
+     * 
+     * 【普通模式】当 jvector.safe-mode=false 时：
+     * - 使用固定批次大小（1000）
+     * - 不监控内存（性能略优，但有 OOM 风险）
+     * 
      * @return 包含所有向量的List
      */
     private List<float[]> loadAllVectorsTemporarily() {
-        log.info("Loading all vectors to temporary storage...");
+        if (safeMode) {
+            log.info("=== Safe Mode ENABLED: Dynamic batch sizing with memory monitoring ===");
+            return loadAllVectorsWithSafeMode();
+        } else {
+            log.info("=== Safe Mode DISABLED: Using fixed batch size (faster but risky) ===");
+            return loadAllVectorsLegacyMode();
+        }
+    }
+    
+    /**
+     * 安全模式：动态批次大小 + 内存监控
+     */
+    private List<float[]> loadAllVectorsWithSafeMode() {
+        log.info("Loading vectors with dynamic batch sizing...");
+        long startTime = System.currentTimeMillis();
+        
+        // 1. 获取 JVM 内存信息
+        Runtime runtime = Runtime.getRuntime();
+        long maxMemory = runtime.maxMemory();
+        long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+        long availableMemory = maxMemory - usedMemory;
+        
+        // 2. 计算安全批次大小（预留 maxMemoryRatio 比例的内存给索引构建）
+        long safeMemoryBudget = (long) (availableMemory * maxMemoryRatio);
+        int vectorSizeBytes = dimensions * 4;  // float = 4 bytes
+        int estimatedBatchSize = (int) (safeMemoryBudget / vectorSizeBytes);
+        
+        // 限制批次范围：最小 100，最大 5000
+        int batchSize = Math.min(Math.max(estimatedBatchSize, 100), 5000);
+        
+        log.info("Memory stats - Max: {}MB, Used: {}MB, Available: {}MB", 
+            maxMemory / 1024 / 1024, 
+            usedMemory / 1024 / 1024, 
+            availableMemory / 1024 / 1024);
+        log.info("Calculated batch size: {} vectors (dimension={}, memory_ratio={})", 
+            batchSize, dimensions, maxMemoryRatio);
+        
+        List<float[]> tempVectors = new ArrayList<>(totalVectorCount.get());
+        long offset = 0;
+        int loadedCount = 0;
+        
+        try {
+            while (offset < totalVectorCount.get()) {
+                // 3. 动态检查内存（每处理一个批次检查一次）
+                if (loadedCount > 0 && loadedCount % batchSize == 0) {
+                    checkAndManageMemory(runtime, maxMemory, loadedCount, totalVectorCount.get());
+                }
+                
+                // 4. 加载批次
+                String sql = "SELECT v.vector_data, v.dimension FROM vectors v ORDER BY v.id LIMIT ? OFFSET ?";
+                List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, batchSize, offset);
+                
+                for (Map<String, Object> row : rows) {
+                    byte[] vectorBytes = (byte[]) row.get("vector_data");
+                    int dimension = ((Number) row.get("dimension")).intValue();
+                    float[] vector = deserializeVector(vectorBytes, dimension);
+                    tempVectors.add(vector);
+                    loadedCount++;
+                }
+                
+                offset += rows.size();
+                
+                // 5. 进度日志（每 10000 个向量输出一次）
+                if (loadedCount % 10000 == 0) {
+                    long currentUsed = runtime.totalMemory() - runtime.freeMemory();
+                    double memoryUsagePercent = (double) currentUsed / maxMemory * 100;
+                    log.info("Loaded {}/{} vectors (Memory usage: {}%)", 
+                        loadedCount, totalVectorCount.get(),
+                        String.format("%.1f", memoryUsagePercent));
+                }
+            }
+        } catch (IOException e) {
+            log.error("Failed to deserialize vectors", e);
+            throw new RuntimeException("Vector deserialization failed", e);
+        }
+        
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("All vectors loaded in safe mode: {} vectors in {}ms", 
+            tempVectors.size(), duration);
+        
+        return tempVectors;
+    }
+    
+    /**
+     * 普通模式：固定批次大小（原有逻辑）
+     */
+    private List<float[]> loadAllVectorsLegacyMode() {
+        log.info("Loading all vectors to temporary storage (legacy mode)...");
         long startTime = System.currentTimeMillis();
         
         List<float[]> tempVectors = new ArrayList<>(totalVectorCount.get());
         
-        int batchSize = 1000;
+        int batchSize = 1000;  // 固定批次大小
         long offset = 0;
         int loadedCount = 0;
         
@@ -387,9 +500,79 @@ public class JVectorService {
         }
         
         long duration = System.currentTimeMillis() - startTime;
-        log.info("All vectors loaded: {} vectors in {}ms", tempVectors.size(), duration);
+        log.info("All vectors loaded (legacy): {} vectors in {}ms", tempVectors.size(), duration);
         
         return tempVectors;
+    }
+    
+    /**
+     * 内存检查与管理（安全模式核心逻辑）
+     * 
+     * @param runtime JVM 运行时
+     * @param maxMemory 最大堆内存
+     * @param loadedCount 已加载向量数
+     * @param totalCount 总向量数
+     */
+    private void checkAndManageMemory(Runtime runtime, long maxMemory, 
+                                      int loadedCount, int totalCount) {
+        long currentUsed = runtime.totalMemory() - runtime.freeMemory();
+        double memoryUsagePercent = (double) currentUsed / maxMemory;
+        
+        // 情况 1：超过紧急阈值（90%），尝试紧急 GC
+        if (memoryUsagePercent > emergencyGcThreshold) {
+            log.warn("⚠️ CRITICAL: Memory usage at {}% (threshold: {}%), triggering emergency GC...", 
+                String.format("%.1f", memoryUsagePercent * 100),
+                String.format("%.1f", emergencyGcThreshold * 100));
+            
+            // 强制 GC
+            System.gc();
+            
+            try {
+                Thread.sleep(200);  // 等待 GC 完成
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            
+            // 检查 GC 效果
+            long afterGcUsed = runtime.totalMemory() - runtime.freeMemory();
+            double afterGcPercent = (double) afterGcUsed / maxMemory;
+            
+            if (afterGcPercent > emergencyGcThreshold) {
+                // GC 后仍然过高，抛出异常
+                String errorMsg = String.format(
+                    "Insufficient memory for index building! " +
+                    "Current usage: %.1f%% (after GC), Max memory: %dMB, " +
+                    "Loaded: %d/%d vectors. " +
+                    "Solutions: 1) Increase heap size (-Xmx), 2) Enable safe mode, " +
+                    "3) Reduce vector count, 4) Use incremental index building.",
+                    afterGcPercent * 100, maxMemory / 1024 / 1024,
+                    loadedCount, totalCount
+                );
+                log.error(errorMsg);
+                throw new OutOfMemoryError(errorMsg);
+            }
+            
+            log.info("Emergency GC successful. Memory reduced to {}%", 
+                String.format("%.1f", afterGcPercent * 100));
+        }
+        // 情况 2：超过 GC 阈值（85%），触发常规 GC
+        else if (memoryUsagePercent > gcThreshold) {
+            log.info("Memory usage at {}% (threshold: {}%), triggering GC...", 
+                String.format("%.1f", memoryUsagePercent * 100),
+                String.format("%.1f", gcThreshold * 100));
+            
+            System.gc();
+            
+            try {
+                Thread.sleep(100);  // 短暂等待
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            
+            long afterGcUsed = runtime.totalMemory() - runtime.freeMemory();
+            log.info("GC completed. Memory usage: {}%", 
+                String.format("%.1f", (double) afterGcUsed / maxMemory * 100));
+        }
     }
     
     /**
@@ -1206,7 +1389,9 @@ public class JVectorService {
         totalVectorCount.set(newNodeIdCount);
         
         // 第3步：使用临时存储重建索引（同启动时的优化）
+        // 【注意】此操作可能需要较长时间，取决于向量数量和内存配置
         if (totalVectorCount.get() > 0) {
+            log.info("Starting full vector reload for index rebuild (this may take a while)...");
             List<float[]> tempVectors = loadAllVectorsTemporarily();
             buildIndexWithTempStorage(tempVectors);
             tempVectors.clear();
