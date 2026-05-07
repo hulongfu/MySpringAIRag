@@ -52,6 +52,12 @@ jvector:
   top-k: 20        # 向量检索返回的候选数量（增加到20，平衡召回率和性能）
   rerank-top-k: 50  # 重排序前检索的候选数量（增加到50，进一步提升召回率）
   similarity-threshold: 0.5  # 降低相似度阈值
+  
+  # === 安全模式配置（防止索引构建时OOM）===
+  safe-mode: true              # 启用安全模式（动态批次调整 + 内存监控）
+  max-memory-ratio: 0.5        # 索引构建时最大内存使用比例（50%）
+  gc-threshold: 0.85           # GC 触发阈值（85%）
+  emergency-gc-threshold: 0.9  # 紧急 GC 阈值（90%）
 
 # File Upload Configuration
 app:
